@@ -1,0 +1,14 @@
+# Analyse-Output
+AnalysisResults/
+sysvol_analysis_checkpoint.json
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Logs (falls lokal)
+*.log
