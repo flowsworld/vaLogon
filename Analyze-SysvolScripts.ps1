@@ -58,7 +58,11 @@ param(
     [ValidateRange(1, 64)]
     [int]$ParallelThreads = 8,
 
-    [string]$OutputPath = ".\AnalysisResults"
+    [string]$OutputPath = ".\AnalysisResults",
+
+    [System.Management.Automation.PSCredential]$Credential,
+
+    [switch]$PromptForCredential
 )
 
 Set-StrictMode -Version Latest
@@ -135,7 +139,9 @@ function Initialize-Environment {
         [string]$ScriptsPath,
 
         [Parameter(Mandatory = $true)]
-        [string]$OutputPath
+        [string]$OutputPath,
+
+        [System.Management.Automation.PSCredential]$Credential
     )
 
     if ($PSVersionTable.PSVersion.Major -lt 7) {
@@ -332,6 +338,9 @@ function Get-UsageFromGpoAndAd {
 
         [Parameter(Mandatory = $true)]
         [bool]$GpModuleAvailable
+        ,
+
+        [System.Management.Automation.PSCredential]$Credential
     )
 
     $usageEntries = @()
@@ -380,7 +389,12 @@ function Get-UsageFromGpoAndAd {
             Write-Log -Message "Starte AD-basierte Nutzungsanalyse (ActiveDirectory-Modul)." -Category 'Usage'
             Import-Module ActiveDirectory -ErrorAction Stop
 
-            $users = Get-ADUser -LDAPFilter '(scriptPath=*)' -Properties scriptPath -ErrorAction Stop
+            if ($Credential) {
+                $users = Get-ADUser -LDAPFilter '(scriptPath=*)' -Properties scriptPath -Credential $Credential -ErrorAction Stop
+            }
+            else {
+                $users = Get-ADUser -LDAPFilter '(scriptPath=*)' -Properties scriptPath -ErrorAction Stop
+            }
             foreach ($u in $users) {
                 if (-not $u.ScriptPath) { continue }
                 $usageEntries += [pscustomobject]@{
@@ -392,7 +406,12 @@ function Get-UsageFromGpoAndAd {
                 }
             }
 
-            $computers = Get-ADComputer -LDAPFilter '(scriptPath=*)' -Properties scriptPath -ErrorAction SilentlyContinue
+            if ($Credential) {
+                $computers = Get-ADComputer -LDAPFilter '(scriptPath=*)' -Properties scriptPath -Credential $Credential -ErrorAction SilentlyContinue
+            }
+            else {
+                $computers = Get-ADComputer -LDAPFilter '(scriptPath=*)' -Properties scriptPath -ErrorAction SilentlyContinue
+            }
             foreach ($c in $computers) {
                 if (-not $c.ScriptPath) { continue }
                 $usageEntries += [pscustomobject]@{
@@ -412,7 +431,17 @@ function Get-UsageFromGpoAndAd {
         try {
             Write-Log -Message "Starte AD-basierte Nutzungsanalyse (ADSI-Fallback)." -Category 'Usage'
 
-            $searcher = [System.DirectoryServices.DirectorySearcher]::new()
+            $searcher = $null
+            if ($Credential) {
+                $netCred = $Credential.GetNetworkCredential()
+                $rootDse = New-Object System.DirectoryServices.DirectoryEntry("LDAP://RootDSE", $netCred.UserName, $netCred.Password)
+                $defaultNamingContext = $rootDse.Properties['defaultNamingContext'][0]
+                $entry = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$defaultNamingContext", $netCred.UserName, $netCred.Password)
+                $searcher = New-Object System.DirectoryServices.DirectorySearcher($entry)
+            }
+            else {
+                $searcher = [System.DirectoryServices.DirectorySearcher]::new()
+            }
             $searcher.Filter = '(&(objectCategory=person)(objectClass=user)(scriptPath=*))'
             $searcher.PageSize = 1000
             $searcher.PropertiesToLoad.Clear()
@@ -1338,7 +1367,11 @@ function Show-InteractiveMenu {
 # region Hauptlogik
 
 try {
-    $envInfo = Initialize-Environment -ScriptsPath $ScriptsPath -OutputPath $OutputPath
+    if ($PromptForCredential -and -not $Credential) {
+        $Credential = Get-Credential -Message 'Anmeldeinformationen für AD-/GPO-/SYSVOL-Analyse (optional)'
+    }
+
+    $envInfo = Initialize-Environment -ScriptsPath $ScriptsPath -OutputPath $OutputPath -Credential $Credential
 
     $checkpointData = $null
     if ($Resume) {
@@ -1367,7 +1400,7 @@ try {
     }
 
     if (-not $script:AnalysisState.Phases.UsageAnalysisCompleted) {
-        $usageRaw = Get-UsageFromGpoAndAd -ScriptsRoot $envInfo.ScriptsPath -AdModuleAvailable $envInfo.AdModuleAvailable -GpModuleAvailable $envInfo.GpModuleAvailable
+        $usageRaw = Get-UsageFromGpoAndAd -ScriptsRoot $envInfo.ScriptsPath -AdModuleAvailable $envInfo.AdModuleAvailable -GpModuleAvailable $envInfo.GpModuleAvailable -Credential $Credential
         $script:AnalysisState.UsageMap = $usageRaw
 
         $usageLookup = @{}

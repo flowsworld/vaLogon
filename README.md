@@ -146,6 +146,14 @@ pwsh.exe -File .\Analyze-SysvolScripts.ps1 `
 - **`-OutputPath`** (string, Default: `.\AnalysisResults`)  
   - Root‑Ordner für Logs, JSON, CSV, HTML und (optional) Excel.
 
+- **`-Credential`** (`[PSCredential]`, optional)  
+  - Optionaler Satz von Anmeldedaten, der für **AD‑Abfragen** (ActiveDirectory‑Modul) und den **ADSI‑Fallback** verwendet wird.  
+  - Ermöglicht es, die Nutzungsanalyse mit einem anderen AD‑Konto durchzuführen, ohne eine neue PowerShell‑Session „Als anderer Benutzer ausführen“ zu starten.
+
+- **`-PromptForCredential`** (Switch)  
+  - Wenn angegeben und `-Credential` nicht gesetzt ist, fragt das Skript zu Beginn einmalig per `Get-Credential` nach Anmeldedaten.  
+  - Praktisch, wenn du die Credentials nicht als Variable/Parameter übergeben möchtest.
+
 ---
 
 ### Was wird analysiert?
