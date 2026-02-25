@@ -1285,9 +1285,10 @@ function Show-ConsoleSummary {
         [hashtable]$State
     )
 
-    $secSummary = Get-RiskSummary -SecurityFindings $State.SecurityFindings
-    $total = $State.Inventory.Count
-    $orphans = ($State.Inventory | Where-Object { $_.UsageCategory -eq 'Verwaist' }).Count
+    $secSummary = Get-RiskSummary -SecurityFindings ($State.SecurityFindings ?? @())
+    $inv = @($State.Inventory ?? @())
+    $total = $inv.Count
+    $orphans = ($inv | Where-Object { $_.UsageCategory -eq 'Verwaist' }).Count
 
     Write-Host ""
     Write-Host "===== SYSVOL Scripts Analyse - Zusammenfassung =====" -ForegroundColor Cyan
@@ -1320,34 +1321,73 @@ function Show-InteractiveMenu {
         Write-Host "[5] Vollständigen Report-Ordner öffnen"
         Write-Host "[Q] Beenden"
         Write-Host ""
-        $choice = Read-Host "Auswahl"
+        $rawInput = try { Read-Host "Auswahl" } catch { '' }
+        $choice = ($rawInput ?? '').ToString().Trim().ToUpperInvariant()
 
-        switch ($choice.ToUpperInvariant()) {
+        switch ($choice) {
             '1' {
-                $State.SecurityFindings |
-                    Sort-Object RiskLevel -Descending |
-                    Select-Object -First 50 |
-                    Format-Table FullPath, IssueType, RiskLevel, Recommendation -AutoSize
+                try {
+                    $findings = @($State.SecurityFindings ?? @())
+                    if ($findings.Count -eq 0) {
+                        Write-Host "Keine Sicherheitsfindings vorhanden." -ForegroundColor Gray
+                    }
+                    else {
+                        $riskOrder = @{ Critical = 4; High = 3; Medium = 2; Low = 1 }
+                        $findings |
+                            Sort-Object { ($riskOrder[$_.RiskLevel] ?? 0) } -Descending |
+                            Select-Object -First 50 FullPath, IssueType, RiskLevel, Recommendation |
+                            Format-Table -AutoSize
+                    }
+                }
+                catch {
+                    Write-Host "Fehler beim Anzeigen: $($_.Exception.Message)" -ForegroundColor Red
+                }
             }
             '2' {
                 Write-Host "Dependency-Graph ist in JSON verfügbar (analysis_results.json). Für Visualisierung bitte externes Tool verwenden." -ForegroundColor Cyan
             }
             '3' {
-                $orphans = $State.Inventory | Where-Object { $_.UsageCategory -eq 'Verwaist' }
-                $orphans | Select-Object -First 50 FullPath, LastWriteTimeUtc, LastAccessTimeUtc |
-                    Format-Table -AutoSize
-                Write-Host ("Insgesamt verwaist: {0}" -f $orphans.Count) -ForegroundColor Yellow
+                try {
+                    $inv = @($State.Inventory ?? @())
+                    $orphans = $inv | Where-Object { $_.UsageCategory -eq 'Verwaist' }
+                    if ($orphans.Count -eq 0) {
+                        Write-Host "Keine verwaisten Skripte." -ForegroundColor Gray
+                    }
+                    else {
+                        $orphans | Select-Object -First 50 FullPath, LastWriteTimeUtc, LastAccessTimeUtc |
+                            Format-Table -AutoSize
+                    }
+                    Write-Host ("Insgesamt verwaist: {0}" -f $orphans.Count) -ForegroundColor Yellow
+                }
+                catch {
+                    Write-Host "Fehler beim Anzeigen: $($_.Exception.Message)" -ForegroundColor Red
+                }
             }
             '4' {
-                $State.DuplicateGroups | Select-Object -First 50 |
-                    Format-Table GroupId, RepresentativePath, DuplicateCount, RecommendedKeep -AutoSize
+                try {
+                    $dups = @($State.DuplicateGroups ?? @())
+                    if ($dups.Count -eq 0) {
+                        Write-Host "Keine Duplikatgruppen." -ForegroundColor Gray
+                    }
+                    else {
+                        $dups | Select-Object -First 50 GroupId, RepresentativePath, DuplicateCount, RecommendedKeep |
+                            Format-Table -AutoSize
+                    }
+                }
+                catch {
+                    Write-Host "Fehler beim Anzeigen: $($_.Exception.Message)" -ForegroundColor Red
+                }
             }
             '5' {
                 $out = $State.OutputPath
+                if (-not $out) {
+                    Write-Host "OutputPath nicht gesetzt." -ForegroundColor Yellow
+                    break
+                }
                 Write-Host "Report-Ordner: $out" -ForegroundColor Cyan
                 try {
                     if ($IsWindows) {
-                        Start-Process explorer.exe $out
+                        Start-Process explorer.exe -ArgumentList $out
                     }
                     else {
                         Start-Process $out
@@ -1357,9 +1397,12 @@ function Show-InteractiveMenu {
                     Write-Host "Konnte Ordner nicht öffnen: $($_.Exception.Message)" -ForegroundColor Red
                 }
             }
-            'Q' { break }
+            'Q' { return }
+            '' {
+                Write-Host "Bitte 1–5 oder Q eingeben." -ForegroundColor Yellow
+            }
             default {
-                Write-Host "Ungültige Auswahl." -ForegroundColor Yellow
+                Write-Host "Ungültige Auswahl. Bitte 1–5 oder Q eingeben." -ForegroundColor Yellow
             }
         }
     }
@@ -1462,7 +1505,8 @@ try {
         $pending = $inventory | Where-Object { -not $processed.Contains($_.FullPath) }
         # Erzeuge temporäres Modul mit Funktionen, die in Parallel-Runspaces benötigt werden.
         $helperFunctions = @('Write-Log', 'Get-FileContentSafe', 'Get-SecurityAndMetricsForFile')
-        $tempModulePath = Join-Path -Path $env:TEMP -ChildPath ("vaLogon_helpers_{0}.psm1" -f ([guid]::NewGuid().ToString()))
+        $tempDir = $env:TEMP ?? $env:TMPDIR ?? [System.IO.Path]::GetTempPath()
+        $tempModulePath = Join-Path -Path $tempDir -ChildPath ("vaLogon_helpers_{0}.psm1" -f ([guid]::NewGuid().ToString()))
         $moduleText = ''
         foreach ($fn in $helperFunctions) {
             $cmd = Get-Command $fn -CommandType Function -ErrorAction SilentlyContinue

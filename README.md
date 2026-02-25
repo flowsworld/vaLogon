@@ -75,6 +75,12 @@ Der Fokus liegt auf **Security**, **Abhängigkeiten**, **Nutzung**, **Duplikaten
   - Checkpoint‑/Resume‑Logik
   - Inventarisierung, Analysen, Exporte, Konsolenmenü
 
+- `Export-VbsFlowchart.ps1`  
+  Eigenständiges Skript für einen **VBS-Flowchart** als HTML:
+  - Findet alle VBS-Dateien unter `ScriptsPath` und löst Aufrufbeziehungen auf (welche VBS ruft welche Dateien auf; welche BAT/CMD/PS1/**KiXtart**-Dateien rufen welche VBS auf).
+  - Erzeugt eine einzelne HTML-Datei mit **Mermaid**-Flowchart und **Tailwind**-Layout; pro VBS wird der vollständige Quellcode in `<pre><code>` ausgegeben.
+  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\VbsFlowchart.html`), `-Encoding` (Fallback für Skriptdateien).
+
 Die Analyseergebnisse werden standardmäßig **unterhalb von** `.\AnalysisResults` abgelegt (anpassbar über `-OutputPath`).
 
 Struktur des Output‑Ordners:
@@ -122,6 +128,17 @@ pwsh.exe -File .\Analyze-SysvolScripts.ps1 `
   - und abgeschlossene Phasen (Inventory, Usage, Content‑Analyse, Duplikate, Dependency‑Graph, Exporte)
   wiederverwendet.
 - Wenn sich der `ScriptsPath` oder die Verzeichnisstruktur stark ändert, ist ein Neustart ohne `-Resume` sinnvoll.
+
+#### VBS-Flowchart (HTML mit Aufrufbeziehungen)
+
+```powershell
+pwsh.exe -File .\Export-VbsFlowchart.ps1 `
+    -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
+```
+
+Optional: `-OutputPath 'D:\Reports\VbsFlow.html'`, `-Encoding` (Fallback-Encoding für Skriptdateien).
+
+Das Skript erkennt Aufrufe aus **VBS** (z. B. `WScript.Shell.Run`, `Execute`), **BAT/CMD** (`call`, `start`, `cmd /c`), **PowerShell** (`& .\*.vbs`, `Start-Process` usw.) und **KiXtart** (`CALL`, `RUN`, `SHELL`). Die HTML-Datei enthält ein Mermaid-Flowchart (Pfeil = „ruft auf“) und pro VBS-Datei den vollständigen Quellcode in `<pre><code>`.
 
 ---
 
