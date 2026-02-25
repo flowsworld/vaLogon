@@ -513,7 +513,7 @@ function Get-FileContentSafe {
         }
     }
     catch {
-        Write-Log -Message "Fehler beim Lesen von $Path: $($_.Exception.Message)" -Level WARN -Category 'Content'
+        Write-Log -Message "Fehler beim Lesen von $Path  $($_.Exception.Message)" -Level WARN -Category 'Content'
         return $null
     }
 }
@@ -991,13 +991,16 @@ function Build-DependencyGraph {
 function Get-RiskSummary {
     param(
         [Parameter(Mandatory = $true)]
-        [pscustomobject[]]$SecurityFindings
+        [object[]]$SecurityFindings
     )
+
+    # Defensive: force into array and handle $null
+    $sf = @($SecurityFindings) | Where-Object { $_ -ne $null }
 
     $levels = @('Critical', 'High', 'Medium', 'Low')
     $summary = [ordered]@{}
     foreach ($lvl in $levels) {
-        $summary[$lvl] = ($SecurityFindings | Where-Object { $_.RiskLevel -eq $lvl }).Count
+        $summary[$lvl] = ($sf | Where-Object { $_.RiskLevel -eq $lvl } | Measure-Object).Count
     }
     return [pscustomobject]$summary
 }
@@ -1457,6 +1460,20 @@ try {
         }
 
         $pending = $inventory | Where-Object { -not $processed.Contains($_.FullPath) }
+        # Erzeuge temporäres Modul mit Funktionen, die in Parallel-Runspaces benötigt werden.
+        $helperFunctions = @('Write-Log', 'Get-FileContentSafe', 'Get-SecurityAndMetricsForFile')
+        $tempModulePath = Join-Path -Path $env:TEMP -ChildPath ("vaLogon_helpers_{0}.psm1" -f ([guid]::NewGuid().ToString()))
+        $moduleText = ''
+        foreach ($fn in $helperFunctions) {
+            $cmd = Get-Command $fn -CommandType Function -ErrorAction SilentlyContinue
+            if (-not $cmd) {
+                throw "Funktion '$fn' nicht gefunden. Stelle sicher, dass sie im Skript definiert ist."
+            }
+            $sbText = $cmd.ScriptBlock.ToString()
+            $moduleText += "function $fn {`n$sbText`n}`n`n"
+        }
+        $moduleText += "Export-ModuleMember -Function " + ($helperFunctions -join ',')
+        Set-Content -Path $tempModulePath -Value $moduleText -Force -Encoding UTF8
         $totalCount = $pending.Count
         $batchSize = 500
         $index = 0
@@ -1469,10 +1486,10 @@ try {
 
             $swBatch = [System.Diagnostics.Stopwatch]::StartNew()
             $results = $batch | ForEach-Object -Parallel {
-                param($scriptsRoot)
+                Import-Module $using:tempModulePath -Force
                 $fileItem = $_
-                return Get-SecurityAndMetricsForFile -FileItem $fileItem -ScriptsRoot $scriptsRoot
-            } -ThrottleLimit $ParallelThreads -ArgumentList $envInfo.ScriptsPath
+                return Get-SecurityAndMetricsForFile -FileItem $fileItem -ScriptsRoot $using:envInfo.ScriptsPath
+            } -ThrottleLimit $ParallelThreads
 
             foreach ($r in $results) {
                 $securityFindingsAll += $r.SecurityFindings
@@ -1497,7 +1514,7 @@ try {
             $script:AnalysisState.SecurityFindings = @($script:AnalysisState.SecurityFindings + $securityFindingsAll)
             $script:AnalysisState.FileMetrics = @($script:AnalysisState.FileMetrics + $metricsAll)
             $script:AnalysisState.DependencyEdges = @($script:AnalysisState.DependencyEdges + $depsAll)
-            $script:AnalysisState.ProcessedFiles = @($processed.ToArray())
+            $script:AnalysisState.ProcessedFiles = @($processed)
 
             Write-Checkpoint -State $script:AnalysisState -CheckpointPath $script:CheckpointPath
 
