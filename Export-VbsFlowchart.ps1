@@ -5,7 +5,7 @@
 .DESCRIPTION
     Findet alle VBS-Dateien unter dem angegebenen Stammpfad (z.B. SYSVOL\scripts), löst Aufrufbeziehungen auf
     (welche VBS ruft welche Dateien auf; welche BAT/CMD/PS1/KiXtart-Dateien rufen welche VBS auf) und erzeugt
-    eine einzelne HTML-Datei mit Mermaid-Flowchart und vollständigem VBS-Quellcode in <pre><code>.
+    eine einzelne HTML-Datei mit Mermaid-Flowchart und Quellcode aller Skripte (VBS, BAT, CMD, PS1, KiXtart, …); Aufrufe/Verlinkungen im Code werden hervorgehoben. Alle dynamischen Inhalte werden HTML-escaped (XSS-Sanitisierung), damit keine Ausführung eingeschleusten Codes möglich ist.
 
 .PARAMETER ScriptsPath
     Stammverzeichnis (z.B. \\domain\SYSVOL\domain\scripts).
@@ -350,6 +350,17 @@ function Build-FlowGraph {
         }
     }
     $nodeList = @($nodes.Values)
+    # Content für alle Knoten nachladen (PS1, BAT, CMD, KIX, VBS), die noch keinen Inhalt haben
+    foreach ($n in $nodeList) {
+        if (-not $n.Content -and $n.FullPath -and (Test-Path -LiteralPath $n.FullPath -ErrorAction SilentlyContinue)) {
+            $n.Content = Get-FileContentSafe -Path $n.FullPath
+        }
+    }
+    # Pro Knoten: Liste der im Code vorkommenden Aufruf-Snippets (für Hervorhebung)
+    foreach ($n in $nodeList) {
+        $calls = @($edges | Where-Object { $_.SourcePath -eq $n.FullPath } | ForEach-Object { $_.RawCall } | Where-Object { $_ })
+        $n | Add-Member -NotePropertyName 'OutgoingRawCalls' -NotePropertyValue $calls -Force
+    }
     return [pscustomobject]@{
         Nodes     = $nodeList
         Edges     = $edges
@@ -382,11 +393,37 @@ function Get-MermaidFlowchart {
         }
     }
     foreach ($n in $Graph.Nodes) {
-        if ($n.Type -eq 'VBS') {
-            [void]$sb.AppendLine("  click $($n.Id) href `"#code-$($n.Id)`"")
-        }
+        [void]$sb.AppendLine("  click $($n.Id) href `"#code-$($n.Id)`"")
     }
     return $sb.ToString()
+}
+
+function Get-CodeWithHighlightedLinks {
+    param(
+        [string]$Content,
+        [string[]]$LinkSnippets
+    )
+    if (-not $Content) { return '' }
+    # Alles escapen, damit im Browser keine Ausführung (XSS) möglich ist.
+    $escaped = [System.Net.WebUtility]::HtmlEncode($Content)
+    $snippets = @($LinkSnippets | Where-Object { $_ } | Sort-Object -Property Length -Descending)
+    foreach ($snip in $snippets) {
+        $snipEscaped = [System.Net.WebUtility]::HtmlEncode($snip)
+        if ($snipEscaped.Length -gt 0 -and $escaped.IndexOf($snipEscaped, [StringComparison]::Ordinal) -ge 0) {
+            # Nur eigenes Markup; Snippet bleibt escaped.
+            $highlight = "<span class=\"bg-amber-300 text-amber-950 rounded px-0.5 font-semibold\" title=\"Aufruf/Verlinkung\">" + $snipEscaped + "</span>"
+            $escaped = $escaped.Replace($snipEscaped, $highlight)
+        }
+    }
+    return $escaped
+}
+
+function Get-HtmlSafeMermaid {
+    param([string]$MermaidCode)
+    if (-not $MermaidCode) { return '' }
+    # Mermaid-Code wird in ein <div> eingefügt und vom Browser als HTML geparst.
+    # Vollständig HTML-escapen, damit keine eingeschleusten Tags (z. B. <script>, <img onerror>) ausgeführt werden.
+    return [System.Net.WebUtility]::HtmlEncode($MermaidCode)
 }
 
 function Export-VbsFlowchartToHtml {
@@ -398,20 +435,29 @@ function Export-VbsFlowchartToHtml {
         [string]$OutputFilePath
     )
     $mermaidCode = Get-MermaidFlowchart -Graph $Graph
-    $vbsSections = [System.Text.StringBuilder]::new()
+    $mermaidCodeSafe = Get-HtmlSafeMermaid -MermaidCode $mermaidCode
+    $codeSections = [System.Text.StringBuilder]::new()
     foreach ($n in $Graph.Nodes) {
-        if ($n.Type -ne 'VBS' -or -not $n.Content) { continue }
-        $anchorId = "code-" + ($n.Id)
+        # ID für Anker/Attribut: nur sichere Zeichen, keine Injektion in id="..."
+        $safeId = $n.Id -replace '[^A-Za-z0-9_-]', '_'
+        $anchorId = "code-" + $safeId
         $displayName = [System.Net.WebUtility]::HtmlEncode($n.DisplayName)
         $fullPath = [System.Net.WebUtility]::HtmlEncode($n.FullPath)
-        $contentEscaped = [System.Net.WebUtility]::HtmlEncode($n.Content)
-        [void]$vbsSections.AppendLine(@"
+        $typeLabel = switch ($n.Type) { 'VBS' { 'VBS' } 'BAT' { 'BAT' } 'CMD' { 'CMD' } 'PS1' { 'PS1' } 'PSM1' { 'PSM1' } 'KIX' { 'KIX' } default { 'Skript' } }
+        $linkSnippets = @($n.OutgoingRawCalls ?? @())
+        $codeWithHighlights = Get-CodeWithHighlightedLinks -Content $n.Content -LinkSnippets $linkSnippets
+        if (-not $n.Content) {
+            $codeWithHighlights = [System.Net.WebUtility]::HtmlEncode("# Datei nicht lesbar oder leer: $($n.FullPath)")
+        }
+        [void]$codeSections.AppendLine(@"
     <section id="$anchorId" class="mb-8 scroll-mt-8">
       <h2 class="text-xl font-semibold text-gray-800 mb-2">
         <a href="#$anchorId" class="text-blue-600 hover:underline">$displayName</a>
+        <span class="ml-2 text-sm font-normal text-gray-500">($typeLabel)</span>
       </h2>
       <p class="text-sm text-gray-500 mb-2 font-mono">$fullPath</p>
-      <pre class="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm"><code>$contentEscaped</code></pre>
+$(if ($linkSnippets.Count -gt 0) { "      <p class=\"text-xs text-amber-700 mb-1\">Gelb markiert: Aufruf/Verlinkung zu anderen Dateien</p>" })
+      <pre class="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm"><code>$codeWithHighlights</code></pre>
     </section>
 "@)
     }
@@ -440,12 +486,13 @@ function Export-VbsFlowchartToHtml {
     <section class="mb-8 bg-white rounded-xl shadow p-4 overflow-x-auto">
       <h2 class="text-lg font-semibold text-gray-800 mb-3">Flowchart</h2>
       <div class="mermaid" id="flowchart">
-$mermaidCode
+$mermaidCodeSafe
       </div>
     </section>
 
-    <h2 class="text-2xl font-bold text-gray-900 mt-12 mb-4">VBS-Quellcode</h2>
-$($vbsSections.ToString())
+    <h2 class="text-2xl font-bold text-gray-900 mt-12 mb-4">Quellcode (alle Skripte)</h2>
+    <p class="text-gray-600 mb-4">Alle aufrufenden und aufgerufenen Dateien (VBS, BAT, CMD, PS1, KiXtart). Gelb markiert: Zeilen/Snippets, die eine andere Datei aufrufen.</p>
+$($codeSections.ToString())
   </div>
   <script>
     mermaid.initialize({ startOnLoad: true, flowchart: { useMaxWidth: true, htmlLabels: true } });
