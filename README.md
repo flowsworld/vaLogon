@@ -81,6 +81,20 @@ Der Fokus liegt auf **Security**, **Abhängigkeiten**, **Nutzung**, **Duplikaten
   - Erzeugt eine einzelne HTML-Datei mit **Mermaid**-Flowchart und **Tailwind**-Layout; pro VBS wird der vollständige Quellcode in `<pre><code>` ausgegeben.
   - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\VbsFlowchart.html`), `-Encoding` (Fallback für Skriptdateien).
 
+- `Analyze-LoginScriptCategories.ps1`  
+  Eigenständiges Skript zur **statistischen Kategorie-Analyse** von Anmeldeskripten:
+  - Analysiert rekursiv alle Skriptdateien (`.ps1`, `.psm1`, `.bat`, `.cmd`, `.vbs`, `.kix`) unter `ScriptsPath` und ordnet sie anhand von Inhaltsmustern Kategorien zu (Laufwerks-Mappings, Drucker, Inventarisierung/Asset, Sicherheit/Compliance, Software-Verteilung, Umgebungsvariablen/Pfade bzw. Unbekannt).
+  - Erzeugt eine HTML-Datei mit **Zusammenfassung** (Anzahl Dateien, durchschnittliche Größe), **Kategorie-Dashboard** (prozentuale Verteilung) und **Dateitabelle** mit primärer Kategorie und Konfidenz-Level (Niedrig/Mittel/Hoch).
+  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\LoginScriptCategoriesReport.html`), `-Encoding` (Fallback beim Einlesen).
+
+- `Analyze-SysvolHostReachability.ps1`  
+  Eigenständiges Skript zur **Host-Erreichbarkeitsanalyse**:
+  - Scannt alle Skript- und Textdateien (`.ps1`, `.psm1`, `.bat`, `.cmd`, `.vbs`, `.kix`, `.txt`) unter `ScriptsPath` und extrahiert Servernamen und IP-Adressen per Regex (UNC-Pfade, URLs, IPv4).
+  - Führt pro Host eine Erreichbarkeitsprüfung durch: DNS-Auflösung, Ping (ICMP), TCP-Ports (80, 443, 445, 135, 3389, 5985) parallel, optional WinRM (`Test-WSMan`).
+  - **Subnet-Scan (optional):** Pro ermitteltem Host wird das zugehörige Subnetz (Standard: /24) nach pingbaren Endpunkten durchsucht; die Ergebnisse erscheinen im HTML in einer eigenen Tabelle (Quell-Host, Subnetz, Anzahl erreichbar, Liste der IPs).
+  - Erzeugt eine HTML-Datei mit **Zusammenfassung**, **Erreichbarkeit pro Host** (farbige Indikatoren) und ggf. **Subnet-Scan** (pingbare IPs pro Subnetz).
+  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\HostReachabilityReport.html`), `-Encoding` (Fallback), `-ThrottleLimit` (Parallelität, Default: 8), `-SubnetScan` (Subnetz-Scan aktivieren, Default: an), `-SubnetPrefixLength` (CIDR, Default: 24).
+
 Die Analyseergebnisse werden standardmäßig **unterhalb von** `.\AnalysisResults` abgelegt (anpassbar über `-OutputPath`).
 
 Struktur des Output‑Ordners:
@@ -139,6 +153,28 @@ pwsh.exe -File .\Export-VbsFlowchart.ps1 `
 Optional: `-OutputPath 'D:\Reports\VbsFlow.html'`, `-Encoding` (Fallback-Encoding für Skriptdateien).
 
 Das Skript erkennt Aufrufe aus **VBS** (z. B. `WScript.Shell.Run`, `Execute`), **BAT/CMD** (`call`, `start`, `cmd /c`), **PowerShell** (`& .\*.vbs`, `Start-Process` usw.) und **KiXtart** (`CALL`, `RUN`, `SHELL`). Die HTML-Datei enthält ein Mermaid-Flowchart (Pfeil = „ruft auf“) und pro VBS-Datei den vollständigen Quellcode in `<pre><code>`.
+
+#### Login-Skript Kategorien (statistische Analyse)
+
+```powershell
+pwsh.exe -File .\Analyze-LoginScriptCategories.ps1 `
+    -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
+```
+
+Optional: `-OutputPath 'D:\Reports\LoginScriptCategoriesReport.html'`, `-Encoding` (Fallback-Encoding).
+
+Das Skript kategorisiert alle gefundenen Skripte (PS1, BAT, CMD, VBS, KiXtart) nach Inhalt (z. B. `net use`/New-PSDrive → Laufwerks-Mappings, Add-Printer/printui.dll → Drucker, Get-CimInstance/systeminfo → Inventarisierung). Der HTML-Report enthält eine Zusammenfassung, ein Balken-Dashboard der Kategorien und eine Tabelle mit Datei, primärer Kategorie und Konfidenz.
+
+#### Host-Erreichbarkeit
+
+```powershell
+pwsh.exe -File .\Analyze-SysvolHostReachability.ps1 `
+    -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
+```
+
+Optional: `-OutputPath 'D:\Reports\HostReachabilityReport.html'`, `-Encoding`, `-ThrottleLimit` (z. B. 4), `-SubnetScan` (Subnetz-Scan, Standard: an), `-SubnetPrefixLength` (z. B. 24 für /24).
+
+Das Skript durchsucht alle Skript- und Textdateien nach Servernamen und IPs (UNC, `http(s)://`, IPv4), entfernt Duplikate und lokale Platzhalter (localhost, 127.0.0.1), und prüft jeden Host: DNS, Ping, TCP-Ports 80/443/445/135/3389/5985 (parallel), WinRM. Wenn **Subnet-Scan** aktiv ist, wird pro Host das zugehörige Subnetz (z. B. /24) ermittelt und nach erreichbaren (pingbaren) IP-Adressen durchsucht. Der HTML-Report enthält eine Zusammenfassung, eine Tabelle mit grünen/roten Badges pro Host (DNS, Ping, Ports, WinRM) und bei aktiviertem Subnet-Scan eine weitere Tabelle „Subnet-Scan (pingbare Endpunkte)“ mit Quell-Host, Subnetz, Anzahl erreichbarer IPs und Liste der IPs.
 
 ---
 
