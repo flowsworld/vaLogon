@@ -31,7 +31,7 @@ Die beiden GPO-Ordner **2217** und **2236** enthalten bewusst **unterschiedliche
 
 | Skript | Zweck |
 |--------|--------|
-| **Export-VbsFlowchart** | VBS ruft VBS/BAT/CMD auf; BAT/CMD/PS1/KIX rufen VBS auf; Pfade wie `helper.vbs`, `..\Logon\login.vbs`. |
+| **Export-ScriptFlowchart** | VBS/BAT/CMD/PS1/KIX rufen sich gegenseitig auf; Pfade wie `helper.vbs`, `..\Logon\login.vbs`. |
 | **Analyze-LoginScriptCategories** | `net use`, `printui.dll`, `Get-CimInstance`/`Win32_`, `[Environment]::SetEnvironmentVariable`, `setx`, `Start-Process`/`msi`, `ExecutionPolicy`. |
 | **Analyze-SysvolHostReachability** | UNC (`\\fileserver01\...`), URLs (`https://intranet...`), IPs in `config.txt`; Subnet-Scan wenn Hosts auflösbar. |
 | **Analyze-SysvolScripts** | Alle Dateitypen, Sicherheits-/Dependency-/Nutzungs-/Duplikat-/Codequalitäts-Muster. |
@@ -44,8 +44,8 @@ Alle Skripte mit `-ScriptsPath` auf den **scripts**-Ordner zeigen:
 # Absoluter Pfad (empfohlen)
 $testPath = (Resolve-Path .\TestSYSVOL\scripts).Path
 
-# VBS-Flowchart
-.\Export-VbsFlowchart.ps1 -ScriptsPath $testPath -OutputPath .\TestVbsFlow.html
+# Skript-Flowchart
+.\Export-ScriptFlowchart.ps1 -ScriptsPath $testPath -OutputPath .\TestScriptFlow.html
 
 # Kategorien
 .\Analyze-LoginScriptCategories.ps1 -ScriptsPath $testPath -OutputPath .\TestCategories.html

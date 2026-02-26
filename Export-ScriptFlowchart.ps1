@@ -1,26 +1,27 @@
 <#
 .SYNOPSIS
-    Erstellt eine HTML-Datei mit Flowchart aller VBS-Dateien und ihrer Aufrufbeziehungen (inkl. Aufrufer: BAT, CMD, PS1, KiXtart).
+    Erstellt eine HTML-Datei mit Flowchart aller Skriptdateien (VBS, BAT, CMD, PS1, PSM1, KIX) und ihrer Aufrufbeziehungen.
 
 .DESCRIPTION
-    Findet alle VBS-Dateien unter dem angegebenen Stammpfad (z.B. SYSVOL\scripts), löst Aufrufbeziehungen auf
-    (welche VBS ruft welche Dateien auf; welche BAT/CMD/PS1/KiXtart-Dateien rufen welche VBS auf) und erzeugt
-    eine einzelne HTML-Datei mit Mermaid-Flowchart und Quellcode aller Skripte (VBS, BAT, CMD, PS1, KiXtart, …); Aufrufe/Verlinkungen im Code werden hervorgehoben. Alle dynamischen Inhalte werden HTML-escaped (XSS-Sanitisierung), damit keine Ausführung eingeschleusten Codes möglich ist.
+    Findet alle Skriptdateien unter dem angegebenen Stammpfad (z.B. SYSVOL\scripts), löst Aufrufbeziehungen auf
+    (wer ruft wen auf) und erzeugt eine einzelne HTML-Datei mit Mermaid-Flowchart und Quellcode aller Skripte;
+    Aufrufe/Verlinkungen im Code werden hervorgehoben; Verweise über Top-Ordner-Grenzen werden rot markiert.
+    Alle dynamischen Inhalte werden HTML-escaped (XSS-Sanitisierung).
 
 .PARAMETER ScriptsPath
     Stammverzeichnis (z.B. \\domain\SYSVOL\domain\scripts).
 
 .PARAMETER OutputPath
-    Pfad der zu erzeugenden HTML-Datei (Default: .\VbsFlowchart.html).
+    Pfad der zu erzeugenden HTML-Datei (Default: .\ScriptFlowchart.html).
 
 .PARAMETER Encoding
     Fallback-Encoding beim Lesen von Skriptdateien (Default: UTF8).
 
 .EXAMPLE
-    .\Export-VbsFlowchart.ps1 -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
+    .\Export-ScriptFlowchart.ps1 -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
 
 .EXAMPLE
-    .\Export-VbsFlowchart.ps1 -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts' -OutputPath 'D:\Reports\VbsFlow.html'
+    .\Export-ScriptFlowchart.ps1 -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts' -OutputPath 'D:\Reports\ScriptFlow.html'
 #>
 
 [CmdletBinding()]
@@ -28,7 +29,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ScriptsPath,
 
-    [string]$OutputPath = ".\VbsFlowchart.html",
+    [string]$OutputPath = ".\ScriptFlowchart.html",
 
     [System.Text.Encoding]$Encoding = [System.Text.Encoding]::UTF8
 )
@@ -39,7 +40,8 @@ $ErrorActionPreference = 'Stop'
 $script:MaxFileBytes = 1MB
 $script:VbsExtensions = @('.vbs')
 $script:CallerExtensions = @('.bat', '.cmd', '.ps1', '.psm1', '.kix')
-$script:CheckpointFileName = 'vbs_flowchart_checkpoint.json'
+$script:AllScriptExtensions = @('.vbs', '.bat', '.cmd', '.ps1', '.psm1', '.kix')
+$script:CheckpointFileName = 'script_flowchart_checkpoint.json'
 $script:CheckpointPath = Join-Path -Path (Get-Location) -ChildPath $script:CheckpointFileName
 
 function Read-Checkpoint {
@@ -142,6 +144,13 @@ function Test-ContentReferencesVbs {
     return $Content -match $vbsRefPattern
 }
 
+function Test-ContentReferencesScript {
+    param([string]$Content)
+    if (-not $Content) { return $false }
+    $scriptRefPattern = '(?i)(\.(?:vbs|bat|cmd|ps1|psm1|kix)\b|WScript\.Shell\.Run|Execute\s*\(|ExecuteGlobal\s*\(|CALL\s+|RUN\s+|SHELL\s+|&\s*["'']|Start-Process\s+)'
+    return $Content -match $scriptRefPattern
+}
+
 function Get-AllRelevantFiles {
     [CmdletBinding()]
     param(
@@ -174,7 +183,7 @@ function Get-AllRelevantFiles {
         $i++
         Write-Progress -Activity 'Scanne Aufrufer-Kandidaten' -Status $c.Name -PercentComplete ([math]::Min(100, [int](100 * $i / $total)))
         $content = Get-FileContentSafe -Path $c.FullName
-        if (Test-ContentReferencesVbs -Content $content) {
+        if (Test-ContentReferencesScript -Content $content) {
             $callerFiles += $c
         }
     }
@@ -198,7 +207,7 @@ function Resolve-TargetPath {
     $candidate = Join-Path -Path $SourceDirectory -ChildPath $raw
     $resolved = Resolve-Path -Path $candidate -ErrorAction SilentlyContinue
     if ($resolved) { return $resolved.Path }
-    foreach ($ext in @('', '.vbs', '.bat', '.cmd', '.ps1')) {
+    foreach ($ext in @('', '.vbs', '.bat', '.cmd', '.ps1', '.psm1', '.kix')) {
         $withExt = $candidate + $ext
         $r = Resolve-Path -Path $withExt -ErrorAction SilentlyContinue
         if ($r) { return $r.Path }
@@ -230,7 +239,7 @@ function Get-VbsCallsFromContent {
             $rawTarget = $m.Groups[1].Value
             if (-not $rawTarget) { continue }
             $resolved = Resolve-TargetPath -RawTarget $rawTarget -SourceDirectory $SourceDirectory
-            if ($resolved) {
+            if ($resolved -and [System.IO.Path]::GetExtension($resolved) -in $script:AllScriptExtensions) {
                 $edges += [pscustomobject]@{
                     SourcePath = $SourcePath
                     TargetPath = $resolved
@@ -266,7 +275,7 @@ function Get-CallersOfVbs {
                 $targetToken = ($cmd -split '\s+')[0]
                 $rawTarget = $targetToken.Trim('"', "'")
                 $resolved = Resolve-TargetPath -RawTarget $rawTarget -SourceDirectory $dir
-                if ($resolved -and [System.IO.Path]::GetExtension($resolved) -eq '.vbs') {
+                if ($resolved -and [System.IO.Path]::GetExtension($resolved) -in $script:AllScriptExtensions) {
                     $edges += [pscustomobject]@{
                         SourcePath = $SourcePath
                         TargetPath = $resolved
@@ -278,19 +287,22 @@ function Get-CallersOfVbs {
     }
     elseif ($Extension -in '.ps1', '.psm1') {
         $psRegexes = @(
-            '(?i)&\s*["'']?(.+?\.vbs)["'']?',
-            '(?i)\.\s*["'']?(.+?\.vbs)["'']?',
-            '(?i)Start-Process\s+["'']?(.+?\.vbs)["'']?',
-            '(?i)Invoke-Expression\s+.*["'']?(.+?\.vbs)["'']?',
-            '(?i)powershell\.exe.+["'']?(.+?\.vbs)["'']?'
+            '(?i)&\s*["'']?(.+?\.(?:vbs|bat|cmd|ps1|psm1|kix))["'']?',
+            '(?i)\.\s*["'']?(.+?\.(?:vbs|bat|cmd|ps1|psm1|kix))["'']?',
+            '(?i)Start-Process\s+["'']?(.+?\.(?:vbs|bat|cmd|ps1|psm1|kix))["'']?',
+            '(?i)Invoke-Expression\s+.*["'']?(.+?\.(?:vbs|bat|cmd|ps1|psm1|kix))["'']?',
+            '(?i)powershell\.exe.+["'']?(.+?\.(?:vbs|bat|cmd|ps1|psm1|kix))["'']?',
+            '(?i)&\s*["'']?([^"''\s]+)["'']?',
+            '(?i)\.\s*["'']?([^"''\s]+)["'']?',
+            '(?i)Start-Process\s+["'']?([^"''\s]+)["'']?'
         )
         foreach ($rx in $psRegexes) {
-            $matches = [regex]::Matches($content, $rx)
-            foreach ($m in $matches) {
+            $matchList = [regex]::Matches($content, $rx)
+            foreach ($m in $matchList) {
                 $rawTarget = $m.Groups[1].Value
                 if (-not $rawTarget) { continue }
                 $resolved = Resolve-TargetPath -RawTarget $rawTarget -SourceDirectory $dir
-                if ($resolved) {
+                if ($resolved -and [System.IO.Path]::GetExtension($resolved) -in $script:AllScriptExtensions) {
                     $edges += [pscustomobject]@{
                         SourcePath = $SourcePath
                         TargetPath = $resolved
@@ -308,7 +320,7 @@ function Get-CallersOfVbs {
                 $rest = $matches[2].Trim()
                 $rawTarget = ($rest -split '\s+')[0].Trim('"', "'")
                 $resolved = Resolve-TargetPath -RawTarget $rawTarget -SourceDirectory $dir
-                if ($resolved -and [System.IO.Path]::GetExtension($resolved) -eq '.vbs') {
+                if ($resolved -and [System.IO.Path]::GetExtension($resolved) -in $script:AllScriptExtensions) {
                     $edges += [pscustomobject]@{
                         SourcePath = $SourcePath
                         TargetPath = $resolved
@@ -357,9 +369,10 @@ function Build-FlowGraph {
         foreach ($e in @($State.Edges)) {
             if ($e.SourcePath -and $e.TargetPath) {
                 $edges += [pscustomobject]@{
-                    SourcePath = $e.SourcePath
-                    TargetPath = $e.TargetPath
-                    RawCall    = $e.RawCall
+                    SourcePath     = $e.SourcePath
+                    TargetPath     = $e.TargetPath
+                    RawCall        = $e.RawCall
+                    IsCrossBoundary = $false
                 }
             }
         }
@@ -461,10 +474,11 @@ function Build-FlowGraph {
                 if ($seenEdges[$key]) { continue }
                 $seenEdges[$key] = $true
                 $targetNode = & $ensureNode $nodes $e.TargetPath $null $null
-                if ($targetNode -and -not $targetNode.Content -and [System.IO.Path]::GetExtension($e.TargetPath) -eq '.vbs') {
+                if ($targetNode -and -not $targetNode.Content -and [System.IO.Path]::GetExtension($e.TargetPath) -in $script:AllScriptExtensions) {
                     $targetNode.Content = Get-FileContentSafe -Path $e.TargetPath
                 }
-                $edges += $e
+                $e2 = [pscustomobject]@{ SourcePath = $e.SourcePath; TargetPath = $e.TargetPath; RawCall = $e.RawCall; IsCrossBoundary = $false }
+                $edges += $e2
             }
             [void]$processedVbs.Add($v.FullName)
             $batch++
@@ -489,7 +503,8 @@ function Build-FlowGraph {
                 if ($seenEdges[$key]) { continue }
                 $seenEdges[$key] = $true
                 $null = & $ensureNode $nodes $e.TargetPath $null $null
-                $edges += $e
+                $e2 = [pscustomobject]@{ SourcePath = $e.SourcePath; TargetPath = $e.TargetPath; RawCall = $e.RawCall; IsCrossBoundary = $false }
+                $edges += $e2
             }
             [void]$processedCallers.Add($c.FullName)
             $batch++
@@ -515,6 +530,13 @@ function Build-FlowGraph {
         & $persist 'ContentLoadCompleted'
     }
     Write-Progress -Activity 'Graph aufbauen' -Completed
+    $rootTrimmed = $RootPath.TrimEnd('\', '/')
+    foreach ($e in $edges) {
+        $srcTop = Get-NodeTopFolder -FullPath $e.SourcePath -RootPath $RootPath
+        $tgtTop = Get-NodeTopFolder -FullPath $e.TargetPath -RootPath $RootPath
+        $targetUnderRoot = $e.TargetPath -and $e.TargetPath.StartsWith($rootTrimmed, [StringComparison]::OrdinalIgnoreCase)
+        $e.IsCrossBoundary = (-not $targetUnderRoot) -or ($srcTop -ne $tgtTop)
+    }
     # Pro Knoten: Liste der im Code vorkommenden Aufruf-Snippets (für Hervorhebung)
     foreach ($n in $nodeList) {
         $calls = @($edges | Where-Object { $_.SourcePath -eq $n.FullPath } | ForEach-Object { $_.RawCall } | Where-Object { $_ })
@@ -544,32 +566,62 @@ function Get-MermaidFlowchart {
         $nodeLabel = $nodeLabel -replace '"', '\"' -replace '\[', '\[' -replace '\]', '\]'
         [void]$sb.AppendLine("  $($n.Id)[`"$nodeLabel`"]")
     }
+    $edgeIndex = 0
     foreach ($e in $Graph.Edges) {
         $sid = $idByPath[$e.SourcePath]
         $tid = $idByPath[$e.TargetPath]
         if ($sid -and $tid) {
             [void]$sb.AppendLine("  $sid --> $tid")
+            $edgeIndex++
         }
     }
     foreach ($n in $Graph.Nodes) {
         [void]$sb.AppendLine("  click $($n.Id) href `"#code-$($n.Id)`"")
     }
+    $idx = 0
+    foreach ($e in $Graph.Edges) {
+        $sid = $idByPath[$e.SourcePath]
+        $tid = $idByPath[$e.TargetPath]
+        if ($sid -and $tid -and $e.IsCrossBoundary) {
+            [void]$sb.AppendLine("  linkStyle $idx stroke:red,stroke-width:2px")
+        }
+        if ($sid -and $tid) { $idx++ }
+    }
     return $sb.ToString()
+}
+
+function Get-NodeTopFolder {
+    param([string]$FullPath, [string]$RootPath)
+    $rootTrimmed = $RootPath.TrimEnd('\', '/')
+    $rel = $FullPath
+    if ($rel.StartsWith($rootTrimmed, [StringComparison]::OrdinalIgnoreCase)) {
+        $rel = $rel.Substring($rootTrimmed.Length).TrimStart('\', '/')
+    }
+    $seg = ($rel -split '[\\/]')[0]
+    if ([string]::IsNullOrWhiteSpace($seg)) { return '(Root)' }
+    return $seg
 }
 
 function Get-CodeWithHighlightedLinks {
     param(
         [string]$Content,
-        [string[]]$LinkSnippets
+        [string[]]$SameFolderSnippets = @(),
+        [string[]]$CrossBoundarySnippets = @()
     )
     if (-not $Content) { return '' }
-    # Alles escapen, damit im Browser keine Ausführung (XSS) möglich ist.
     $escaped = [System.Net.WebUtility]::HtmlEncode($Content)
-    $snippets = @($LinkSnippets | Where-Object { $_ } | Sort-Object -Property Length -Descending)
-    foreach ($snip in $snippets) {
+    $cross = @($CrossBoundarySnippets | Where-Object { $_ } | Sort-Object -Property Length -Descending)
+    $same = @($SameFolderSnippets | Where-Object { $_ } | Sort-Object -Property Length -Descending)
+    foreach ($snip in $cross) {
         $snipEscaped = [System.Net.WebUtility]::HtmlEncode($snip)
         if ($snipEscaped.Length -gt 0 -and $escaped.IndexOf($snipEscaped, [StringComparison]::Ordinal) -ge 0) {
-            # Nur eigenes Markup; Snippet bleibt escaped.
+            $highlight = "<span class=`"bg-red-200 text-red-900 rounded px-0.5 font-semibold`" title=`"Verweis in anderen Top-Ordner / nach außen`">" + $snipEscaped + "</span>"
+            $escaped = $escaped.Replace($snipEscaped, $highlight)
+        }
+    }
+    foreach ($snip in $same) {
+        $snipEscaped = [System.Net.WebUtility]::HtmlEncode($snip)
+        if ($snipEscaped.Length -gt 0 -and $escaped.IndexOf($snipEscaped, [StringComparison]::Ordinal) -ge 0) {
             $highlight = "<span class=`"bg-amber-300 text-amber-950 rounded px-0.5 font-semibold`" title=`"Aufruf/Verlinkung`">" + $snipEscaped + "</span>"
             $escaped = $escaped.Replace($snipEscaped, $highlight)
         }
@@ -585,41 +637,193 @@ function Get-HtmlSafeMermaid {
     return [System.Net.WebUtility]::HtmlEncode($MermaidCode)
 }
 
-function Export-VbsFlowchartToHtml {
+function Export-ScriptFlowchartToHtml {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [pscustomobject]$Graph,
         [Parameter(Mandatory = $true)]
-        [string]$OutputFilePath
+        [string]$OutputFilePath,
+        [Parameter(Mandatory = $true)]
+        [string]$RootPath
     )
-    $mermaidCode = Get-MermaidFlowchart -Graph $Graph
-    $mermaidCodeSafe = Get-HtmlSafeMermaid -MermaidCode $mermaidCode
+    $rootTrimmed = $RootPath.TrimEnd('\', '/')
+    $nodesWithTop = @($Graph.Nodes | ForEach-Object {
+        $top = Get-NodeTopFolder -FullPath $_.FullPath -RootPath $RootPath
+        [pscustomobject]@{ Node = $_; TopFolder = $top }
+    })
+    $topFoldersList = @($nodesWithTop | ForEach-Object { $_.TopFolder } | Sort-Object -Unique)
+
+    $reportNodes = @($nodesWithTop | ForEach-Object {
+        [ordered]@{
+            id          = $_.Node.Id
+            fullPath    = $_.Node.FullPath
+            displayName = $_.Node.DisplayName
+            type        = $_.Node.Type
+            topFolder   = $_.TopFolder
+        }
+    })
+    $reportEdges = @($Graph.Edges | ForEach-Object {
+        [ordered]@{
+            sourcePath     = $_.SourcePath
+            targetPath     = $_.TargetPath
+            isCrossBoundary = [bool]$_.IsCrossBoundary
+        }
+    })
+    $reportData = @{ nodes = $reportNodes; edges = $reportEdges } | ConvertTo-Json -Depth 3 -Compress
+    $reportDataEscaped = $reportData -replace '</', '\u003c/'
+
+    $mermaidGesamt = Get-MermaidFlowchart -Graph $Graph
+    $mermaidGesamtSafe = Get-HtmlSafeMermaid -MermaidCode $mermaidGesamt
+    $flowchartContainerHtml = @"
+    <div class="flowchart-container">
+      <div id="mermaid-target" class="mermaid">$mermaidGesamtSafe</div>
+    </div>
+"@
+
+    $dropdownTopOptions = ($topFoldersList | ForEach-Object {
+        $enc = [System.Net.WebUtility]::HtmlEncode($_)
+        "        <option value=`"$enc`">$enc</option>"
+    }) -join "`n"
+    $dropdownTypeOptions = (@('', 'VBS', 'BAT', 'CMD', 'PS1', 'PSM1', 'KIX') | ForEach-Object {
+        $label = if ($_ -eq '') { 'Gesamt' } else { $_ }
+        $val = [System.Net.WebUtility]::HtmlEncode($_)
+        "        <option value=`"$val`">$label</option>"
+    }) -join "`n"
+    $filterBlock = @"
+    <div class="mb-6 flex flex-wrap items-center gap-4">
+      <div class="flex items-center gap-2">
+        <label for="filter-topfolder" class="text-sm font-medium text-gray-700">Filter: Top-Ordner</label>
+        <select id="filter-topfolder" class="rounded border border-gray-300 px-3 py-1.5 text-gray-900 focus:ring-2 focus:ring-blue-500">
+          <option value="">Gesamt</option>
+$dropdownTopOptions
+        </select>
+      </div>
+      <div class="flex items-center gap-2">
+        <label for="filter-type" class="text-sm font-medium text-gray-700">Filter: Dateityp</label>
+        <select id="filter-type" class="rounded border border-gray-300 px-3 py-1.5 text-gray-900 focus:ring-2 focus:ring-blue-500">
+$dropdownTypeOptions
+        </select>
+      </div>
+    </div>
+"@
+
+    $graphEdges = @($Graph.Edges)
     $codeSections = [System.Text.StringBuilder]::new()
-    foreach ($n in $Graph.Nodes) {
-        # ID für Anker/Attribut: nur sichere Zeichen, keine Injektion in id="..."
+    foreach ($nw in $nodesWithTop) {
+        $n = $nw.Node
+        $topFolder = $nw.TopFolder
+        $topFolderEnc = [System.Net.WebUtility]::HtmlEncode($topFolder)
         $safeId = $n.Id -replace '[^A-Za-z0-9_-]', '_'
         $anchorId = "code-" + $safeId
         $displayName = [System.Net.WebUtility]::HtmlEncode($n.DisplayName)
         $fullPath = [System.Net.WebUtility]::HtmlEncode($n.FullPath)
         $typeLabel = switch ($n.Type) { 'VBS' { 'VBS' } 'BAT' { 'BAT' } 'CMD' { 'CMD' } 'PS1' { 'PS1' } 'PSM1' { 'PSM1' } 'KIX' { 'KIX' } default { 'Skript' } }
-        $linkSnippets = @($n.OutgoingRawCalls ?? @())
-        $codeWithHighlights = Get-CodeWithHighlightedLinks -Content $n.Content -LinkSnippets $linkSnippets
+        $outgoing = @($graphEdges | Where-Object { $_.SourcePath -eq $n.FullPath })
+        $sameSnippets = @($outgoing | Where-Object { -not $_.IsCrossBoundary } | ForEach-Object { $_.RawCall } | Where-Object { $_ })
+        $crossSnippets = @($outgoing | Where-Object { $_.IsCrossBoundary } | ForEach-Object { $_.RawCall } | Where-Object { $_ })
+        $codeWithHighlights = Get-CodeWithHighlightedLinks -Content $n.Content -SameFolderSnippets $sameSnippets -CrossBoundarySnippets $crossSnippets
         if (-not $n.Content) {
             $codeWithHighlights = [System.Net.WebUtility]::HtmlEncode("# Datei nicht lesbar oder leer: $($n.FullPath)")
         }
+        $hasLinks = ($sameSnippets.Count + $crossSnippets.Count) -gt 0
+        $legendText = if ($crossSnippets.Count -gt 0) { "Gelb: Aufruf im gleichen Top-Ordner. Rot: Verweis in anderen Top-Ordner / nach außen." } else { "Gelb markiert: Aufruf/Verlinkung zu anderen Dateien" }
         [void]$codeSections.AppendLine(@"
-    <section id="$anchorId" class="mb-8 scroll-mt-8">
+    <section id="$anchorId" class="mb-8 scroll-mt-8" data-topfolder="$topFolderEnc" data-type="$typeLabel">
       <h2 class="text-xl font-semibold text-gray-800 mb-2">
         <a href="#$anchorId" class="text-blue-600 hover:underline">$displayName</a>
         <span class="ml-2 text-sm font-normal text-gray-500">($typeLabel)</span>
       </h2>
       <p class="text-sm text-gray-500 mb-2 font-mono">$fullPath</p>
-$(if ($linkSnippets.Count -gt 0) { "      <p class=`"text-xs text-amber-700 mb-1`">Gelb markiert: Aufruf/Verlinkung zu anderen Dateien</p>" })
+$(if ($hasLinks) { "      <p class=`"text-xs text-amber-700 mb-1`">$legendText</p>" })
       <pre class="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm"><code>$codeWithHighlights</code></pre>
     </section>
 "@)
     }
+    $filterScript = @'
+(function() {
+  var selectTop = document.getElementById('filter-topfolder');
+  var selectType = document.getElementById('filter-type');
+  var mermaidTarget = document.getElementById('mermaid-target');
+  var sections = document.querySelectorAll('section[data-topfolder]');
+  var dataEl = document.getElementById('reportData');
+  var reportData = (dataEl && dataEl.textContent) ? JSON.parse(dataEl.textContent) : { nodes: [], edges: [] };
+  var nodes = reportData.nodes || [];
+  var edges = reportData.edges || [];
+  var renderId = 0;
+  function escapeMermaidLabel(s) {
+    if (!s) return '';
+    return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\[/g, '\\[').replace(/\]/g, '\\]');
+  }
+  function buildMermaidCode(filteredNodes, filteredEdges) {
+    var pathSet = {};
+    filteredNodes.forEach(function(n) { pathSet[n.fullPath] = true; });
+    var idByPath = {};
+    filteredNodes.forEach(function(n) { idByPath[n.fullPath] = n.id; });
+    var lines = ['flowchart LR', '  direction TB'];
+    filteredNodes.forEach(function(n) {
+      var typeLabel = n.type || '';
+      var label = typeLabel ? n.displayName + ' (' + typeLabel + ')' : n.displayName;
+      lines.push('  ' + n.id + '["' + escapeMermaidLabel(label) + '"]');
+    });
+    var edgeIndex = 0;
+    var crossBoundaryIndices = [];
+    filteredEdges.forEach(function(e) {
+      var sid = idByPath[e.sourcePath];
+      var tid = idByPath[e.targetPath];
+      if (sid && tid) {
+        lines.push('  ' + sid + ' --> ' + tid);
+        if (e.isCrossBoundary) crossBoundaryIndices.push(edgeIndex);
+        edgeIndex++;
+      }
+    });
+    filteredNodes.forEach(function(n) {
+      lines.push('  click ' + n.id + ' href "#code-' + n.id.replace(/[^A-Za-z0-9_-]/g, '_') + '"');
+    });
+    crossBoundaryIndices.forEach(function(idx) {
+      lines.push('  linkStyle ' + idx + ' stroke:red,stroke-width:2px');
+    });
+    return lines.join('\n');
+  }
+  function renderMermaid(code) {
+    if (!mermaidTarget || typeof mermaid === 'undefined') return;
+    if (!code || !code.trim()) { mermaidTarget.innerHTML = ''; return; }
+    var id = 'mermaid-render-' + (++renderId);
+    mermaid.render(id, code).then(function(result) {
+      mermaidTarget.innerHTML = result.svg || '';
+      if (result.bindFunctions) result.bindFunctions(mermaidTarget);
+    }).catch(function(err) {
+      mermaidTarget.textContent = 'Diagramm-Fehler: ' + (err.message || String(err));
+    });
+  }
+  function applyFilter() {
+    var topVal = selectTop ? selectTop.value : '';
+    var typeVal = selectType ? selectType.value : '';
+    var filteredNodes = nodes.filter(function(n) {
+      var topOk = topVal === '' || n.topFolder === topVal;
+      var typeOk = typeVal === '' || n.type === typeVal;
+      return topOk && typeOk;
+    });
+    var pathSet = {};
+    filteredNodes.forEach(function(n) { pathSet[n.fullPath] = true; });
+    var filteredEdges = edges.filter(function(e) {
+      return pathSet[e.sourcePath] && pathSet[e.targetPath];
+    });
+    var code = buildMermaidCode(filteredNodes, filteredEdges);
+    renderMermaid(code);
+    sections.forEach(function(sec) {
+      var tf = sec.getAttribute('data-topfolder') || '';
+      var typ = sec.getAttribute('data-type') || '';
+      var topOk = topVal === '' || tf === topVal;
+      var typeOk = typeVal === '' || typ === typeVal;
+      sec.style.display = (topOk && typeOk) ? '' : 'none';
+    });
+  }
+  if (selectTop) selectTop.addEventListener('change', applyFilter);
+  if (selectType) selectType.addEventListener('change', applyFilter);
+  applyFilter();
+})();
+'@
     $html = @"
 <!DOCTYPE html>
 <html lang="de">
@@ -641,20 +845,22 @@ $(if ($linkSnippets.Count -gt 0) { "      <p class=`"text-xs text-amber-700 mb-1
         <span class="px-2 py-1 rounded bg-purple-100 text-purple-800 text-sm">KiXtart</span>
       </div>
     </header>
-
+    $filterBlock
     <section class="mb-8 bg-white rounded-xl shadow p-4 overflow-x-auto">
       <h2 class="text-lg font-semibold text-gray-800 mb-3">Flowchart</h2>
-      <div class="mermaid" id="flowchart">
-$mermaidCodeSafe
-      </div>
+$flowchartContainerHtml
     </section>
 
     <h2 class="text-2xl font-bold text-gray-900 mt-12 mb-4">Quellcode (alle Skripte)</h2>
-    <p class="text-gray-600 mb-4">Alle aufrufenden und aufgerufenen Dateien (VBS, BAT, CMD, PS1, KiXtart). Gelb markiert: Zeilen/Snippets, die eine andere Datei aufrufen.</p>
+    <p class="text-gray-600 mb-4">Alle aufrufenden und aufgerufenen Dateien (VBS, BAT, CMD, PS1, KiXtart). Gelb: Aufruf im gleichen Top-Ordner. Rot: Verweis in anderen Top-Ordner oder nach außen. Rote Pfeile im Diagramm = gleiche Bedeutung.</p>
 $($codeSections.ToString())
+  <script type="application/json" id='reportData'>$reportDataEscaped</script>
   </div>
   <script>
-    mermaid.initialize({ startOnLoad: true, flowchart: { useMaxWidth: true, htmlLabels: true } });
+    mermaid.initialize({ startOnLoad: false, flowchart: { useMaxWidth: true, htmlLabels: true } });
+  </script>
+  <script>
+$filterScript
   </script>
 </body>
 </html>
@@ -726,7 +932,7 @@ $outDir = [System.IO.Path]::GetDirectoryName($outResolved)
 if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
-Export-VbsFlowchartToHtml -Graph $graph -OutputFilePath $outResolved
+Export-ScriptFlowchartToHtml -Graph $graph -OutputFilePath $outResolved -RootPath $rootPath
 $state.Phases.HtmlExported = $true
 Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
 

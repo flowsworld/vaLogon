@@ -115,23 +115,31 @@ function Get-ScriptFileInventory {
 
 function Get-CategoryPatterns {
     # Liefert Hashtable: Kategorie -> @(Regex-Patterns). Alle case-insensitive.
+    # Enthält Muster für PowerShell, BAT/CMD, VBS und KiXtart.
     $opts = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
     return [ordered]@{
         'Laufwerks-Mappings'          = @(
             [regex]::new('net\s+use', $opts),
             [regex]::new('New-PSDrive', $opts),
-            [regex]::new('MapNetworkDrive', $opts)
+            [regex]::new('MapNetworkDrive', $opts),
+            [regex]::new('RemoveNetworkDrive', $opts),
+            [regex]::new('WScript\.Network', $opts)
         )
         'Drucker-Einrichtung'         = @(
             [regex]::new('Add-Printer', $opts),
             [regex]::new('AddWindowsPrinterConnection', $opts),
-            [regex]::new('printui\.dll', $opts)
+            [regex]::new('AddPrinterConnection', $opts),
+            [regex]::new('SetDefaultPrinter', $opts),
+            [regex]::new('printui\.dll', $opts),
+            [regex]::new('rundll32.*printui', $opts)
         )
         'Inventarisierung/Asset'      = @(
             [regex]::new('Get-CimInstance', $opts),
             [regex]::new('Get-WmiObject', $opts),
             [regex]::new('systeminfo', $opts),
-            [regex]::new('Win32_', $opts)
+            [regex]::new('Win32_', $opts),
+            [regex]::new('winmgmts:', $opts),
+            [regex]::new('GetObject\s*\(.*wmi', $opts)
         )
         'Sicherheit/Compliance'        = @(
             [regex]::new('ExecutionPolicy', $opts),
@@ -143,11 +151,16 @@ function Get-CategoryPatterns {
             [regex]::new('\.msi\b', $opts),
             [regex]::new('msiexec', $opts),
             [regex]::new('Start-Process', $opts),
-            [regex]::new('\.exe\b', $opts)
+            [regex]::new('\.exe\b', $opts),
+            [regex]::new('Shell\.Run', $opts),
+            [regex]::new('WshShell\.Run', $opts),
+            [regex]::new('\.Exec\s*\(', $opts)
         )
         'Umgebungsvariablen/Pfade'    = @(
             [regex]::new('setx', $opts),
-            [regex]::new('\[Environment\]::SetEnvironmentVariable', $opts)
+            [regex]::new('\[Environment\]::SetEnvironmentVariable', $opts),
+            [regex]::new('WshShell\.Environment', $opts),
+            [regex]::new('ExpandEnvironmentStrings', $opts)
         )
     }
 }
@@ -196,6 +209,11 @@ function Export-CategoriesReportToHtml {
         [Parameter(Mandatory = $true)]
         [string]$OutputFilePath
     )
+    # Top-Ordner = erstes Segment des relativen Pfads
+    $topFoldersList = @($Results | ForEach-Object {
+        $seg = ($_.RelativePath -split '[\\/]')[0]
+        if ([string]::IsNullOrWhiteSpace($seg)) { '(Root)' } else { $seg }
+    } | Sort-Object -Unique)
     $totalFiles = $Results.Count
     $readable = @($Results | Where-Object { $_.Unreadable -ne $true })
     $unreadableCount = $totalFiles - $readable.Count
@@ -210,12 +228,12 @@ function Export-CategoriesReportToHtml {
     }
 
     $summaryHtml = @"
-    <section class="mb-8 bg-white rounded-xl shadow p-4">
+    <section id="summary-section" class="mb-8 bg-white rounded-xl shadow p-4">
       <h2 class="text-lg font-semibold text-gray-800 mb-3">Zusammenfassung</h2>
       <ul class="text-gray-700 space-y-1">
-        <li><strong>Dateien gesamt:</strong> $totalFiles</li>
-        <li><strong>Durchschnittliche Größe:</strong> $avgKb KB</li>
-$(if ($unreadableCount -gt 0) { "        <li class=`"text-amber-700`"><strong>Nicht lesbar:</strong> $unreadableCount</li>" })
+        <li><strong>Dateien gesamt:</strong> <span id="summary-total">$totalFiles</span></li>
+        <li><strong>Durchschnittliche Größe:</strong> <span id="summary-avgkb">$avgKb</span> KB</li>
+        <li id="summary-unreadable-li"$(if ($unreadableCount -eq 0) { ' style="display:none"' } else { '' }) class="text-amber-700"><strong>Nicht lesbar:</strong> <span id="summary-unreadable">$unreadableCount</span></li>
       </ul>
     </section>
 "@
@@ -233,13 +251,13 @@ $(if ($unreadableCount -gt 0) { "        <li class=`"text-amber-700`"><strong>Ni
             'Umgebung' { 'bg-cyan-500' }
             default { 'bg-gray-500' }
         }
-        "      <div class=`"mb-2`"><div class=`"flex justify-between text-sm mb-0.5`"><span>$name</span><span>$p % ($cnt)</span></div><div class=`"w-full bg-gray-200 rounded h-4`"><div class=`"$color h-4 rounded`" style=`"width:$p%`" title=`"$name`"></div></div></div>"
+        "      <div class=`"mb-2`" data-category=`"$([System.Net.WebUtility]::HtmlEncode($_.Name))`"><div class=`"flex justify-between text-sm mb-0.5`"><span>$name</span><span class=`"dashboard-count`">$p % ($cnt)</span></div><div class=`"w-full bg-gray-200 rounded h-4`"><div class=`"$color h-4 rounded dashboard-bar`" style=`"width:$p%`" title=`"$name`"></div></div></div>"
     }) -join "`n"
 
     $dashboardHtml = @"
     <section class="mb-8 bg-white rounded-xl shadow p-4">
       <h2 class="text-lg font-semibold text-gray-800 mb-3">Kategorien (primär)</h2>
-      <div class="max-w-2xl">
+      <div id="dashboard-bars" class="max-w-2xl">
 $bars
       </div>
     </section>
@@ -248,6 +266,9 @@ $bars
     $rows = [System.Text.StringBuilder]::new()
     foreach ($r in ($Results | Sort-Object -Property FullName)) {
         $relPath = $r.RelativePath
+        $topFolder = ($relPath -split '[\\/]')[0]
+        if ([string]::IsNullOrWhiteSpace($topFolder)) { $topFolder = '(Root)' }
+        $topFolderEnc = [System.Net.WebUtility]::HtmlEncode($topFolder)
         $fileName = $r.FileName
         $prim = $r.PrimaryCategory
         $conf = $r.Confidence
@@ -258,10 +279,44 @@ $bars
         $primEnc = [System.Net.WebUtility]::HtmlEncode($prim)
         $confEnc = [System.Net.WebUtility]::HtmlEncode($conf)
         $allCatEnc = [System.Net.WebUtility]::HtmlEncode($allCat)
-        [void]$rows.AppendLine("        <tr><td class=`"font-mono text-sm`">$fileNameEnc</td><td class=`"font-mono text-sm text-gray-600`">$relPathEnc</td><td>$primEnc</td><td>$confEnc</td><td class=`"text-sm text-gray-600`">$allCatEnc</td></tr>")
+        [void]$rows.AppendLine("        <tr data-topfolder=`"$topFolderEnc`"><td class=`"font-mono text-sm`">$fileNameEnc</td><td class=`"font-mono text-sm text-gray-600`">$relPathEnc</td><td>$primEnc</td><td>$confEnc</td><td class=`"text-sm text-gray-600`">$allCatEnc</td></tr>")
     }
 
     $tableHtml = $rows.ToString()
+
+    $reportResults = @($Results | Sort-Object -Property FullName | ForEach-Object {
+        $top = ($_.RelativePath -split '[\\/]')[0]
+        if ([string]::IsNullOrWhiteSpace($top)) { $top = '(Root)' }
+        [ordered]@{
+            relativePath   = $_.RelativePath
+            topFolder      = $top
+            fileName       = $_.FileName
+            size           = [long]$_.Size
+            unreadable     = [bool]$_.Unreadable
+            primaryCategory= $_.PrimaryCategory
+            confidence     = $_.Confidence
+            allCategories  = @($_.AllCategories)
+        }
+    })
+    $reportDataJson = @{
+        topFolders = @($topFoldersList)
+        results    = $reportResults
+    } | ConvertTo-Json -Depth 4 -Compress
+    $reportDataJsonEscaped = $reportDataJson -replace '</', '\u003c/'   # Verhindert </script> im HTML
+
+    $dropdownOptions = ($topFoldersList | ForEach-Object {
+        $enc = [System.Net.WebUtility]::HtmlEncode($_)
+        "        <option value=`"$enc`">$enc</option>"
+    }) -join "`n"
+    $filterBlock = @"
+    <div class="mb-6 flex items-center gap-3">
+      <label for="filter-topfolder" class="text-sm font-medium text-gray-700">Filter: Top-Ordner</label>
+      <select id="filter-topfolder" class="rounded border border-gray-300 px-3 py-1.5 text-gray-900 focus:ring-2 focus:ring-blue-500">
+        <option value="">Gesamt</option>
+$dropdownOptions
+      </select>
+    </div>
+"@
 
     $html = @"
 <!DOCTYPE html>
@@ -277,6 +332,7 @@ $bars
       <h1 class="text-3xl font-bold text-gray-900">Login-Skript Kategorien</h1>
       <p class="mt-2 text-gray-600">Statistische Analyse der Anmeldeskripte nach Inhaltskategorien.</p>
     </header>
+    $filterBlock
 $summaryHtml
 $dashboardHtml
     <section class="mb-8 bg-white rounded-xl shadow p-4 overflow-x-auto">
@@ -291,12 +347,65 @@ $dashboardHtml
             <th class="py-2 pr-4">Alle Kategorien</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody id="files-tbody">
 $tableHtml
         </tbody>
       </table>
     </section>
   </div>
+  <script type="application/json" id="reportData">$reportDataJsonEscaped</script>
+  <script>
+(function() {
+  var dataEl = document.getElementById('reportData');
+  if (!dataEl) return;
+  var raw = dataEl.textContent;
+  var reportData = JSON.parse(raw);
+  var results = reportData.results || [];
+  var select = document.getElementById('filter-topfolder');
+  var tbody = document.getElementById('files-tbody');
+  var summaryTotal = document.getElementById('summary-total');
+  var summaryAvgkb = document.getElementById('summary-avgkb');
+  var summaryUnreadable = document.getElementById('summary-unreadable');
+  var summaryUnreadableLi = document.getElementById('summary-unreadable-li');
+  var dashboardBars = document.getElementById('dashboard-bars');
+  var categoryColors = { 'Laufwerks': 'bg-blue-500', 'Drucker': 'bg-amber-500', 'Inventar': 'bg-green-500', 'Sicherheit': 'bg-red-500', 'Software': 'bg-purple-500', 'Umgebung': 'bg-cyan-500' };
+  function getColor(name) { for (var k in categoryColors) if (name && name.indexOf(k) !== -1) return categoryColors[k]; return 'bg-gray-500'; }
+  function applyFilter(value) {
+    var filtered = value === '' ? results : results.filter(function(r) { return r.topFolder === value; });
+    var rows = tbody ? tbody.querySelectorAll('tr') : [];
+    for (var i = 0; i < rows.length; i++) {
+      var tf = rows[i].getAttribute('data-topfolder');
+      var show = value === '' || tf === value;
+      rows[i].style.display = show ? '' : 'none';
+    }
+    var total = filtered.length;
+    var readable = filtered.filter(function(r) { return !r.unreadable; });
+    var unreadableCount = total - readable.length;
+    var sumSize = readable.reduce(function(s, r) { return s + (r.size || 0); }, 0);
+    var avgKb = total > 0 ? (sumSize / readable.length / 1024).toFixed(2) : 0;
+    if (readable.length === 0) avgKb = 0;
+    if (summaryTotal) summaryTotal.textContent = total;
+    if (summaryAvgkb) summaryAvgkb.textContent = avgKb;
+    if (summaryUnreadable) summaryUnreadable.textContent = unreadableCount;
+    if (summaryUnreadableLi) { summaryUnreadableLi.style.display = unreadableCount > 0 ? '' : 'none'; }
+    var byCat = {};
+    filtered.forEach(function(r) { var p = r.primaryCategory || 'Unbekannt'; byCat[p] = (byCat[p] || 0) + 1; });
+    var order = Object.keys(byCat).sort(function(a,b) { return (byCat[b]||0) - (byCat[a]||0); });
+    if (dashboardBars) {
+      var html = '';
+      order.forEach(function(name) {
+        var cnt = byCat[name];
+        var pct = total > 0 ? (100 * cnt / total).toFixed(1) : 0;
+        var color = getColor(name);
+        html += '<div class="mb-2" data-category="' + name.replace(/"/g,'&quot;') + '"><div class="flex justify-between text-sm mb-0.5"><span>' + name.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</span><span class="dashboard-count">' + pct + ' % (' + cnt + ')</span></div><div class="w-full bg-gray-200 rounded h-4"><div class="' + color + ' h-4 rounded dashboard-bar" style="width:' + pct + '%" title="' + name.replace(/"/g,'&quot;') + '"></div></div></div>';
+      });
+      dashboardBars.innerHTML = html;
+    }
+  }
+  if (select) select.addEventListener('change', function() { applyFilter(select.value); });
+  applyFilter(select ? select.value : '');
+})();
+  </script>
 </body>
 </html>
 "@

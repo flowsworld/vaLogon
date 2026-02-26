@@ -89,7 +89,35 @@ function Write-Checkpoint {
         [string]$CheckpointPath
     )
     try {
-        $State | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $CheckpointPath -Encoding UTF8 -ErrorAction Stop
+        # Ports in HostResults sind Hashtables mit int-Keys; JSON unterstützt nur string-Keys.
+        $hostResultsSerializable = @($State.HostResults | ForEach-Object {
+            $hr = $_
+            $portStr = [ordered]@{}
+            if ($hr.Ports -is [hashtable]) {
+                foreach ($k in $hr.Ports.Keys) { $portStr["$k"] = $hr.Ports[$k] }
+            }
+            [pscustomobject]@{
+                Host      = $hr.Host
+                DnsOk     = $hr.DnsOk
+                PingOk    = $hr.PingOk
+                Ports     = $portStr
+                WinRmOk   = $hr.WinRmOk
+                TopFolders = $hr.TopFolders
+            }
+        })
+        $stateToSerialize = [ordered]@{
+            Version            = $State.Version
+            ScriptsPath        = $State.ScriptsPath
+            TimestampUtc       = $State.TimestampUtc
+            FilesScannedCount  = $State.FilesScannedCount
+            FilesPerTopFolder  = $State.FilesPerTopFolder
+            UniqueHosts        = $State.UniqueHosts
+            HostResults        = $hostResultsSerializable
+            SubnetScanData     = $State.SubnetScanData
+            Phases             = $State.Phases
+            Errors             = $State.Errors
+        }
+        $stateToSerialize | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $CheckpointPath -Encoding UTF8 -ErrorAction Stop
     }
     catch {
         Write-Warning "Fehler beim Schreiben des Checkpoints: $($_.Exception.Message)"
@@ -99,20 +127,21 @@ function Write-Checkpoint {
 function New-HostReachabilityState {
     param([string]$ScriptsPathValue)
     return [ordered]@{
-        Version          = 1
-        ScriptsPath      = $ScriptsPathValue
-        TimestampUtc     = (Get-Date).ToUniversalTime()
-        FilesScannedCount= 0
-        UniqueHosts      = @()
-        HostResults      = @()
-        SubnetScanData   = @()
-        Phases           = @{
+        Version            = 1
+        ScriptsPath        = $ScriptsPathValue
+        TimestampUtc       = (Get-Date).ToUniversalTime()
+        FilesScannedCount  = 0
+        FilesPerTopFolder  = @{}
+        UniqueHosts         = @()
+        HostResults        = @()
+        SubnetScanData     = @()
+        Phases             = @{
             FileScanCompleted   = $false
             HostChecksCompleted = $false
             SubnetScanCompleted = $false
             ReportExported      = $false
         }
-        Errors           = @()
+        Errors              = @()
     }
 }
 
@@ -188,12 +217,19 @@ function Get-AllUniqueHosts {
         [Parameter(Mandatory = $true)]
         [string]$RootPath
     )
-    $allHosts = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $rootTrimmed = $RootPath.TrimEnd('\', '/')
+    $hostToTopFolders = [System.Collections.Generic.Dictionary[string, [System.Collections.Generic.HashSet[string]]]]::new([StringComparer]::OrdinalIgnoreCase)
     $total = $Files.Count
     $i = 0
     foreach ($f in $Files) {
         $i++
         Write-Progress -Activity 'Dateien scannen' -Status $f.Name -PercentComplete ([math]::Min(100, [int](100 * $i / $total)))
+        $relPath = $f.FullName
+        if ($relPath.StartsWith($rootTrimmed, [StringComparison]::OrdinalIgnoreCase)) {
+            $relPath = $relPath.Substring($rootTrimmed.Length).TrimStart('\', '/')
+        }
+        $topFolder = ($relPath -split '[\\/]')[0]
+        if ([string]::IsNullOrWhiteSpace($topFolder)) { $topFolder = '(Root)' }
         $content = Get-FileContentSafe -Path $f.FullName
         $found = Get-UniqueHostsFromContent -Content $content
         foreach ($h in $found) {
@@ -201,11 +237,18 @@ function Get-AllUniqueHosts {
             if ([string]::IsNullOrWhiteSpace($h)) { continue }
             if ($script:ExcludedHosts -contains $h) { continue }
             if ($h -match '^%') { continue }
-            [void]$allHosts.Add($h)
+            if (-not $hostToTopFolders.ContainsKey($h)) {
+                $hostToTopFolders[$h] = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            }
+            [void]$hostToTopFolders[$h].Add($topFolder)
         }
     }
     Write-Progress -Activity 'Dateien scannen' -Completed
-    return @($allHosts)
+    $out = @()
+    foreach ($kv in $hostToTopFolders.GetEnumerator()) {
+        $out += [pscustomobject]@{ Host = $kv.Key; TopFolders = @($kv.Value) }
+    }
+    return @($out)
 }
 
 function Test-TcpPort {
@@ -346,6 +389,7 @@ function Export-HostReachabilityHtml {
         [Parameter(Mandatory = $true)]
         [string]$OutputFilePath,
         [int]$FilesScanned = 0,
+        [hashtable]$FilesPerTopFolder = @{},
         [array]$SubnetScanData = @()
     )
     $totalHosts = $Results.Count
@@ -358,9 +402,13 @@ function Export-HostReachabilityHtml {
     $badgeFail = 'bg-red-100 text-red-800 rounded px-2 py-0.5 text-sm'
     $badgeNa = 'bg-gray-100 text-gray-600 rounded px-2 py-0.5 text-sm'
 
+    $topFoldersList = @($Results | ForEach-Object { $_.TopFolders } | Where-Object { $_ } | ForEach-Object { $_ } | Sort-Object -Unique)
     $rows = [System.Text.StringBuilder]::new()
     $portsOrder = @(80, 443, 445, 135, 3389, 5985)
     foreach ($r in $Results) {
+        $tfs = @($r.TopFolders) | Where-Object { $_ }
+        $topFoldersStr = ($tfs | Sort-Object -Unique) -join ','
+        $topFoldersEnc = [System.Net.WebUtility]::HtmlEncode($topFoldersStr)
         $hostEnc = [System.Net.WebUtility]::HtmlEncode($r.Host)
         $dnsClass = if ($r.DnsOk) { $badgeOk } else { $badgeFail }
         $dnsText = if ($r.DnsOk) { 'OK' } else { 'Fehler' }
@@ -376,8 +424,135 @@ function Export-HostReachabilityHtml {
             $t = if ($open) { 'Offen' } else { 'Geschlossen' }
             "<td><span class=`"$c`" title=`"Port $p`">$t</span></td>"
         }) -join ''
-        [void]$rows.AppendLine("        <tr><td class=`"font-mono`">$hostEnc</td><td><span class=`"$dnsClass`">$dnsText</span></td><td><span class=`"$pingClass`">$pingText</span></td>$portCells<td><span class=`"$winRmClass`">$winRmText</span></td></tr>")
+        [void]$rows.AppendLine("        <tr data-topfolders=`"$topFoldersEnc`"><td class=`"font-mono`">$hostEnc</td><td><span class=`"$dnsClass`">$dnsText</span></td><td><span class=`"$pingClass`">$pingText</span></td>$portCells<td><span class=`"$winRmClass`">$winRmText</span></td></tr>")
     }
+
+    $reportHostResults = @($Results | ForEach-Object {
+        $tfs = @($_.TopFolders) | Where-Object { $_ }
+        $portsObj = @{}
+        if ($_.Ports -is [hashtable]) {
+            foreach ($k in $_.Ports.Keys) { $portsObj["$k"] = $_.Ports[$k] }
+        }
+        [ordered]@{
+            host       = $_.Host
+            topFolders = @($tfs | Sort-Object -Unique)
+            dnsOk      = [bool]$_.DnsOk
+            pingOk     = [bool]$_.PingOk
+            ports      = $portsObj
+            winRmOk    = $_.WinRmOk
+        }
+    })
+    $filesPerTopFolderObj = @{}
+    if ($FilesPerTopFolder) {
+        foreach ($k in $FilesPerTopFolder.Keys) { $filesPerTopFolderObj[$k] = $FilesPerTopFolder[$k] }
+    }
+    $reportDataJson = @{
+        results            = $reportHostResults
+        totalFilesScanned  = $FilesScanned
+        filesPerTopFolder  = $filesPerTopFolderObj
+    } | ConvertTo-Json -Depth 4 -Compress
+    $reportDataJsonEscaped = $reportDataJson -replace '</', '\u003c/'
+
+    $dropdownOptions = ($topFoldersList | ForEach-Object {
+        $enc = [System.Net.WebUtility]::HtmlEncode($_)
+        "        <option value=`"$enc`">$enc</option>"
+    }) -join "`n"
+    $filterBlock = @"
+    <div class="mb-6 flex items-center gap-3">
+      <label for="filter-topfolder" class="text-sm font-medium text-gray-700">Filter: Top-Ordner</label>
+      <select id="filter-topfolder" class="rounded border border-gray-300 px-3 py-1.5 text-gray-900 focus:ring-2 focus:ring-blue-500">
+        <option value="">Gesamt</option>
+$dropdownOptions
+      </select>
+    </div>
+"@
+
+    $subnetSectionHtml = ''
+    if ($SubnetScanData.Count -gt 0) {
+        $subnetRows = [System.Text.StringBuilder]::new()
+        foreach ($s in $SubnetScanData) {
+            $tfs = $s.SourceTopFolders
+            if ($null -eq $tfs -or @($tfs).Count -eq 0) {
+                $tfs = @()
+                foreach ($sh in (($s.SourceHost -split ',').Trim())) {
+                    $res = $Results | Where-Object { $_.Host -eq $sh } | Select-Object -First 1
+                    if ($res -and $res.TopFolders) { $tfs += $res.TopFolders }
+                }
+                $tfs = @($tfs | Sort-Object -Unique)
+            }
+            $topFoldersStr = ($tfs -join ',')
+            $topFoldersEnc = [System.Net.WebUtility]::HtmlEncode($topFoldersStr)
+            $hostEnc = [System.Net.WebUtility]::HtmlEncode($s.SourceHost)
+            $subnetEnc = [System.Net.WebUtility]::HtmlEncode($s.Subnet)
+            $count = $s.ReachableIPs.Count
+            $ipsEnc = [System.Net.WebUtility]::HtmlEncode(($s.ReachableIPs | Sort-Object) -join ', ')
+            [void]$subnetRows.AppendLine("        <tr data-topfolders=`"$topFoldersEnc`"><td class=`"font-mono`">$hostEnc</td><td class=`"font-mono`">$subnetEnc</td><td>$count</td><td class=`"font-mono text-sm max-w-md truncate`" title=`"$ipsEnc`">$ipsEnc</td></tr>")
+        }
+        $subnetSectionHtml = @"
+    <section class="mb-8 bg-white rounded-xl shadow p-4 overflow-x-auto" id="subnet-section">
+      <h2 class="text-lg font-semibold text-gray-800 mb-3">Subnet-Scan (pingbare Endpunkte)</h2>
+      <p class="text-sm text-gray-600 mb-3">Pro ermitteltem Host wurde das zugehörige Subnetz (/24) nach erreichbaren (pingbaren) IP-Adressen durchsucht.</p>
+      <table class="w-full text-left border-collapse">
+        <thead>
+          <tr class="border-b border-gray-300">
+            <th class="py-2 pr-4">Quell-Host</th>
+            <th class="py-2 pr-4">Subnetz</th>
+            <th class="py-2 pr-4">Anzahl erreichbar</th>
+            <th class="py-2 pr-4">Erreichbare IPs</th>
+          </tr>
+        </thead>
+        <tbody id="subnet-tbody">
+$($subnetRows.ToString())
+        </tbody>
+      </table>
+    </section>
+"@
+    }
+
+    $filterScript = @'
+(function() {
+  var dataEl = document.getElementById('reportData');
+  var results = (dataEl && dataEl.textContent) ? JSON.parse(dataEl.textContent).results || [] : [];
+  var select = document.getElementById('filter-topfolder');
+  var hostsTbody = document.getElementById('hosts-tbody');
+  var subnetTbody = document.getElementById('subnet-tbody');
+  var summaryFiles = document.getElementById('summary-files');
+  var summaryHosts = document.getElementById('summary-hosts');
+  var summaryPing = document.getElementById('summary-ping');
+  var summaryPorts = document.getElementById('summary-ports');
+  var totalFilesScanned = (dataEl && dataEl.textContent) ? (JSON.parse(dataEl.textContent).totalFilesScanned || 0) : 0;
+  var filesPerTopFolder = (dataEl && dataEl.textContent) ? (JSON.parse(dataEl.textContent).filesPerTopFolder || {}) : {};
+  function hasAnyPortOpen(r) {
+    var p = r.ports || {};
+    for (var k in p) if (p[k]) return true;
+    return false;
+  }
+  function applyFilter(value) {
+    function showRow(tr) {
+      if (!tr) return;
+      var tf = tr.getAttribute('data-topfolders') || '';
+      var show = value === '' || (tf && tf.split(',').indexOf(value) >= 0);
+      tr.style.display = show ? '' : 'none';
+    }
+    if (hostsTbody) hostsTbody.querySelectorAll('tr').forEach(showRow);
+    if (subnetTbody) subnetTbody.querySelectorAll('tr').forEach(showRow);
+    var filtered = value === '' ? results : results.filter(function(r) {
+      var tfs = r.topFolders || [];
+      return tfs.indexOf(value) >= 0;
+    });
+    var total = filtered.length;
+    var pingOk = filtered.filter(function(r) { return r.pingOk; }).length;
+    var portsOk = filtered.filter(hasAnyPortOpen).length;
+    var fileCount = value === '' ? totalFilesScanned : (filesPerTopFolder[value] || 0);
+    if (summaryFiles) summaryFiles.textContent = fileCount;
+    if (summaryHosts) summaryHosts.textContent = total;
+    if (summaryPing) summaryPing.textContent = pingOk;
+    if (summaryPorts) summaryPorts.textContent = portsOk;
+  }
+  if (select) select.addEventListener('change', function() { applyFilter(select.value); });
+  applyFilter(select ? select.value : '');
+})();
+'@
 
     $html = @"
 <!DOCTYPE html>
@@ -393,13 +568,14 @@ function Export-HostReachabilityHtml {
       <h1 class="text-3xl font-bold text-gray-900">SYSVOL Host-Erreichbarkeit</h1>
       <p class="mt-2 text-gray-600">Aus Skripten extrahierte Servernamen und IPs sowie Ergebnis der Erreichbarkeitsprüfung.</p>
     </header>
-    <section class="mb-8 bg-white rounded-xl shadow p-4">
+    $filterBlock
+    <section class="mb-8 bg-white rounded-xl shadow p-4" id="summary-section">
       <h2 class="text-lg font-semibold text-gray-800 mb-3">Zusammenfassung</h2>
       <ul class="text-gray-700 space-y-1">
-        <li><strong>Dateien gescannt:</strong> $FilesScanned</li>
-        <li><strong>Eindeutige Hosts:</strong> $totalHosts</li>
-        <li><strong>Ping erreichbar:</strong> $reachableByPing</li>
-        <li><strong>Mind. ein Port offen:</strong> $anyPortOpen</li>
+        <li><strong>Dateien gescannt:</strong> <span id="summary-files">$FilesScanned</span></li>
+        <li><strong>Eindeutige Hosts:</strong> <span id="summary-hosts">$totalHosts</span></li>
+        <li><strong>Ping erreichbar:</strong> <span id="summary-ping">$reachableByPing</span></li>
+        <li><strong>Mind. ein Port offen:</strong> <span id="summary-ports">$anyPortOpen</span></li>
       </ul>
     </section>
     <section class="mb-8 bg-white rounded-xl shadow p-4 overflow-x-auto">
@@ -419,42 +595,14 @@ function Export-HostReachabilityHtml {
             <th class="py-2 pr-4">WinRM Test</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody id="hosts-tbody">
 $($rows.ToString())
         </tbody>
       </table>
     </section>
-$(if ($SubnetScanData.Count -gt 0) {
-    $subnetRows = [System.Text.StringBuilder]::new()
-    foreach ($s in $SubnetScanData) {
-      $hostEnc = [System.Net.WebUtility]::HtmlEncode($s.SourceHost)
-      $subnetEnc = [System.Net.WebUtility]::HtmlEncode($s.Subnet)
-      $count = $s.ReachableIPs.Count
-      $ipsEnc = [System.Net.WebUtility]::HtmlEncode(($s.ReachableIPs | Sort-Object) -join ', ')
-      [void]$subnetRows.AppendLine("        <tr><td class=`"font-mono`">$hostEnc</td><td class=`"font-mono`">$subnetEnc</td><td>$count</td><td class=`"font-mono text-sm max-w-md truncate`" title=`"$ipsEnc`">$ipsEnc</td></tr>")
-    }
-    "    <section class=`"mb-8 bg-white rounded-xl shadow p-4 overflow-x-auto`">
-      <h2 class=`"text-lg font-semibold text-gray-800 mb-3`">Subnet-Scan (pingbare Endpunkte)</h2>
-      <p class=`"text-sm text-gray-600 mb-3`">Pro ermitteltem Host wurde das zugehörige Subnetz (/24) nach erreichbaren (pingbaren) IP-Adressen durchsucht.</p>
-      <table class=`"w-full text-left border-collapse`">
-        <thead>
-          <tr class=`"border-b border-gray-300`">
-            <th class=`"py-2 pr-4`">Quell-Host</th>
-            <th class=`"py-2 pr-4`">Subnetz</th>
-            <th class=`"py-2 pr-4`">Anzahl erreichbar</th>
-            <th class=`"py-2 pr-4`">Erreichbare IPs</th>
-          </tr>
-        </thead>
-        <tbody>
-$($subnetRows.ToString())
-        </tbody>
-      </table>
-    </section>"
-} else { '' })
-  </div>
-</body>
-</html>
 "@
+    $htmlTail = "  <script type=`"application/json`" id=`"reportData`">$reportDataJsonEscaped</script>`n  <script>`n" + $filterScript + "`n  </script>`n  </div>`n</body>`n</html>`n"
+    $html = $html + $subnetSectionHtml + $htmlTail
     try {
         $html | Set-Content -Path $OutputFilePath -Encoding UTF8
         Write-Host "HTML geschrieben: $OutputFilePath" -ForegroundColor Green
@@ -485,16 +633,29 @@ $state = New-HostReachabilityState -ScriptsPathValue $rootPath
 $checkpoint = Read-Checkpoint -CheckpointPath $script:CheckpointPath
 if ($checkpoint -and $checkpoint.ScriptsPath -eq $rootPath -and $checkpoint.Version -eq 1) {
     Write-Host "Checkpoint gefunden, setze fort: $script:CheckpointFileName" -ForegroundColor Yellow
+    $fpTf = @{}
+    if ($checkpoint.FilesPerTopFolder) {
+        $checkpoint.FilesPerTopFolder.PSObject.Properties | ForEach-Object { $fpTf[$_.Name] = [int]$_.Value }
+    }
     $state = [ordered]@{
-        Version           = 1
-        ScriptsPath       = $checkpoint.ScriptsPath
-        TimestampUtc      = $checkpoint.TimestampUtc
-        FilesScannedCount = [int]$checkpoint.FilesScannedCount
-        UniqueHosts       = @($checkpoint.UniqueHosts)
-        HostResults       = @($checkpoint.HostResults)
-        SubnetScanData    = @($checkpoint.SubnetScanData)
-        Phases            = $checkpoint.Phases
-        Errors            = @($checkpoint.Errors)
+        Version            = 1
+        ScriptsPath        = $checkpoint.ScriptsPath
+        TimestampUtc       = $checkpoint.TimestampUtc
+        FilesScannedCount  = [int]$checkpoint.FilesScannedCount
+        FilesPerTopFolder  = $fpTf
+        UniqueHosts        = @($checkpoint.UniqueHosts)
+        HostResults        = @($checkpoint.HostResults)
+        SubnetScanData     = @($checkpoint.SubnetScanData)
+        Phases             = $checkpoint.Phases
+        Errors             = @($checkpoint.Errors)
+    }
+    # Ports aus JSON sind PSCustomObject (string-Keys); für $r.Ports[$p] und .Values wieder int-Key-Hashtable
+    foreach ($r in $state.HostResults) {
+        if ($null -eq $r.Ports) { continue }
+        if ($r.Ports -is [hashtable]) { continue }
+        $ht = @{}
+        $r.Ports.PSObject.Properties | ForEach-Object { $ht[[int]$_.Name] = $_.Value }
+        $r.Ports = $ht
     }
 }
 elseif ($checkpoint) {
@@ -509,6 +670,19 @@ $uniqueHosts = @()
 if (-not $state.Phases.FileScanCompleted -or -not $state.UniqueHosts -or $state.UniqueHosts.Count -eq 0) {
     $files = Get-RelevantFiles -RootPath $rootPath
     Write-Host "Gefunden: $($files.Count) Dateien." -ForegroundColor Cyan
+    $rootTrimmed = $rootPath.TrimEnd('\', '/')
+    $filesPerTopFolder = @{}
+    foreach ($f in $files) {
+        $rel = ''
+        if ($f.FullName.Length -gt $rootTrimmed.Length) {
+            $rel = $f.FullName.Substring($rootTrimmed.Length).TrimStart('\', '/')
+        }
+        $top = ($rel -split '[\\/]')[0]
+        if (-not $top) { $top = '(Root)' }
+        if (-not $filesPerTopFolder.ContainsKey($top)) { $filesPerTopFolder[$top] = 0 }
+        $filesPerTopFolder[$top] += 1
+    }
+    $state.FilesPerTopFolder = $filesPerTopFolder
     $uniqueHosts = Get-AllUniqueHosts -Files $files -RootPath $rootPath
     $state.UniqueHosts = @($uniqueHosts)
     $state.FilesScannedCount = $files.Count
@@ -519,6 +693,22 @@ else {
     $uniqueHosts = @($state.UniqueHosts)
     Write-Host "Gefunden: $($state.FilesScannedCount) Dateien. (aus Checkpoint)" -ForegroundColor Cyan
 }
+$hostToTopFolders = @{}
+foreach ($o in $uniqueHosts) {
+    $h = $o.Host
+    $tfs = $o.TopFolders
+    if ($null -eq $tfs) { $tfs = @() }
+    if ($tfs -isnot [array]) { $tfs = @($tfs) }
+    $hostToTopFolders[$h] = @($tfs)
+}
+$resultsList = [System.Collections.ArrayList]::new()
+foreach ($r in @($state.HostResults)) {
+    $tfs = if ($r.TopFolders) { @($r.TopFolders) } else { $hostToTopFolders[$r.Host] }
+    if ($null -eq $tfs) { $tfs = @() }
+    [void]$resultsList.Add([pscustomobject]@{ Host = $r.Host; DnsOk = $r.DnsOk; PingOk = $r.PingOk; Ports = $r.Ports; WinRmOk = $r.WinRmOk; TopFolders = $tfs })
+}
+$checkedSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($r in @($resultsList)) { if ($r.Host) { [void]$checkedSet.Add([string]$r.Host) } }
 Write-Host "Eindeutige Hosts/IPs: $($uniqueHosts.Count)" -ForegroundColor Cyan
 if ($uniqueHosts.Count -gt 0 -and $checkedSet.Count -gt 0) {
     Write-Host ("Resume: HostChecks erledigt: {0}/{1}" -f $checkedSet.Count, $uniqueHosts.Count) -ForegroundColor Yellow
@@ -562,28 +752,25 @@ function Invoke-HostChecksBatch {
     })
 }
 
-$resultsList = [System.Collections.ArrayList]::new()
-foreach ($r in @($state.HostResults)) { [void]$resultsList.Add($r) }
-$checkedSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-foreach ($r in @($resultsList)) { if ($r.Host) { [void]$checkedSet.Add([string]$r.Host) } }
-
 try {
     if ($uniqueHosts.Count -eq 0) {
         Write-Host "Keine Hosts gefunden. Leere HTML wird erzeugt." -ForegroundColor Yellow
     }
     else {
         $totalHosts = [math]::Max(1, $uniqueHosts.Count)
-        $remaining = @($uniqueHosts | Where-Object { -not $checkedSet.Contains($_) })
+        $remaining = @($uniqueHosts | Where-Object { -not $checkedSet.Contains($_.Host) })
         if ($remaining.Count -gt 0) {
             $batchSize = 25
             for ($i = 0; $i -lt $remaining.Count; $i += $batchSize) {
-                $batch = $remaining[$i..([math]::Min($i + $batchSize - 1, $remaining.Count - 1))]
+                $batchHosts = @($remaining[$i..([math]::Min($i + $batchSize - 1, $remaining.Count - 1))] | ForEach-Object { $_.Host })
                 $pct = [math]::Min(100, [int](100 * $checkedSet.Count / $totalHosts))
                 Write-Progress -Activity 'Erreichbarkeit prüfen' -Status ("{0}/{1} Hosts" -f $checkedSet.Count, $uniqueHosts.Count) -PercentComplete $pct
-                $batchResults = Invoke-HostChecksBatch -Hosts $batch -Throttle $ThrottleLimit
+                $batchResults = Invoke-HostChecksBatch -Hosts $batchHosts -Throttle $ThrottleLimit
                 foreach ($br in $batchResults) {
                     if ($br.Host -and -not $checkedSet.Contains($br.Host)) {
-                        [void]$resultsList.Add($br)
+                        $tfs = $hostToTopFolders[$br.Host]
+                        if ($null -eq $tfs) { $tfs = @() }
+                        [void]$resultsList.Add([pscustomobject]@{ Host = $br.Host; DnsOk = $br.DnsOk; PingOk = $br.PingOk; Ports = $br.Ports; WinRmOk = $br.WinRmOk; TopFolders = $tfs })
                         [void]$checkedSet.Add([string]$br.Host)
                     }
                 }
@@ -643,10 +830,16 @@ if ($SubnetScan -and $results.Count -gt 0) {
         if (-not $info -or $null -eq $info.Last) { continue }
         $reachable = Get-PingableIPsInSubnet -SubnetBase $info.Base -First $info.First -Last $info.Last -Throttle $ThrottleLimit
         $sourceHosts = @($subnetToHosts[$subnetKey])
+        $sourceTopFoldersSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($sh in $sourceHosts) {
+            $res = $results | Where-Object { $_.Host -eq $sh } | Select-Object -First 1
+            if ($res -and $res.TopFolders) { foreach ($tf in $res.TopFolders) { [void]$sourceTopFoldersSet.Add($tf) } }
+        }
         $entry = [pscustomobject]@{
-            SourceHost   = ($sourceHosts -join ', ')
-            Subnet       = $subnetKey
-            ReachableIPs = @($reachable)
+            SourceHost       = ($sourceHosts -join ', ')
+            SourceTopFolders = @($sourceTopFoldersSet)
+            Subnet           = $subnetKey
+            ReachableIPs     = @($reachable)
         }
         [void]$subnetScanData.Add($entry)
         [void]$scannedSubnetSet.Add($subnetKey)
@@ -668,7 +861,7 @@ $outDir = [System.IO.Path]::GetDirectoryName($outResolved)
 if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
-Export-HostReachabilityHtml -Results $results -OutputFilePath $outResolved -FilesScanned $state.FilesScannedCount -SubnetScanData $subnetScanDataFinal
+Export-HostReachabilityHtml -Results $results -OutputFilePath $outResolved -FilesScanned $state.FilesScannedCount -FilesPerTopFolder $state.FilesPerTopFolder -SubnetScanData $subnetScanDataFinal
 $state.Phases.ReportExported = $true
 Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
 
