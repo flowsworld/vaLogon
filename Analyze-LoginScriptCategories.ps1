@@ -503,7 +503,19 @@ try {
         Write-Progress -Activity 'Kategorisiere Skripte' -Status $fi.Name -PercentComplete ([math]::Min(100, [int](100 * $doneCount / $totalFiles)))
 
         $content = Get-FileContentSafe -Path $full
-        $relativePath = $full.Substring($rootPath.TrimEnd('\', '/').Length).TrimStart('\', '/')
+        # Relativen Pfad sicher ermitteln: Substring wirft, wenn $full kürzer als Root oder $full nicht unter Root liegt.
+        $rootTrimmed = $rootPath.TrimEnd('\', '/')
+        if ([string]::IsNullOrEmpty($full)) {
+            $relativePath = $fi.Name ?? ''
+        } elseif ([string]::IsNullOrEmpty($rootTrimmed)) {
+            $relativePath = $full.TrimStart('\', '/')
+        } elseif ($full.Length -lt $rootTrimmed.Length) {
+            $relativePath = $fi.Name ?? $full
+        } elseif ($full.StartsWith($rootTrimmed, [StringComparison]::OrdinalIgnoreCase)) {
+            $relativePath = $full.Substring($rootTrimmed.Length).TrimStart('\', '/')
+        } else {
+            $relativePath = $fi.Name ?? $full
+        }
         if ($null -eq $content) {
             $res = [pscustomobject]@{
                 FullName        = $full
