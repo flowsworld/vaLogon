@@ -108,12 +108,17 @@ function Get-AllRelevantFiles {
         }
     }
     $callerFiles = @()
+    $total = $callerCandidates.Count
+    $i = 0
     foreach ($c in $callerCandidates) {
+        $i++
+        Write-Progress -Activity 'Scanne Aufrufer-Kandidaten' -Status $c.Name -PercentComplete ([math]::Min(100, [int](100 * $i / $total)))
         $content = Get-FileContentSafe -Path $c.FullName
         if (Test-ContentReferencesVbs -Content $content) {
             $callerFiles += $c
         }
     }
+    Write-Progress -Activity 'Scanne Aufrufer-Kandidaten' -Completed
     return $vbsFiles, $callerFiles
 }
 
@@ -306,7 +311,11 @@ function Build-FlowGraph {
         $NodeDict[$FullPath] = $node
         return $node
     }
+    $totalV = [math]::Max(1, $VbsFiles.Count)
+    $idx = 0
     foreach ($v in $VbsFiles) {
+        $idx++
+        Write-Progress -Activity 'Graph aufbauen' -Status "VBS laden: $($v.Name)" -PercentComplete ([math]::Min(100, [int](100 * $idx / $totalV)))
         $content = Get-FileContentSafe -Path $v.FullName
         $null = & $ensureNode $nodes $v.FullName 'VBS' $content
     }
@@ -322,7 +331,10 @@ function Build-FlowGraph {
         $null = & $ensureNode $nodes $c.FullName $type $null
     }
     $seenEdges = @{}
+    $idx = 0
     foreach ($v in $VbsFiles) {
+        $idx++
+        Write-Progress -Activity 'Graph aufbauen' -Status "VBS-Aufrufe parsen: $($v.Name)" -PercentComplete ([math]::Min(100, [int](100 * $idx / $totalV)))
         $content = Get-FileContentSafe -Path $v.FullName
         $dir = $v.DirectoryName
         $outEdges = Get-VbsCallsFromContent -Content $content -SourcePath $v.FullName -SourceDirectory $dir
@@ -337,7 +349,11 @@ function Build-FlowGraph {
             $edges += $e
         }
     }
+    $totalC = [math]::Max(1, $CallerFiles.Count)
+    $idxC = 0
     foreach ($c in $CallerFiles) {
+        $idxC++
+        Write-Progress -Activity 'Graph aufbauen' -Status "Aufrufer parsen: $($c.Name)" -PercentComplete ([math]::Min(100, [int](100 * $idxC / $totalC)))
         $content = Get-FileContentSafe -Path $c.FullName
         $dir = $c.DirectoryName
         $outEdges = Get-CallersOfVbs -Content $content -SourcePath $c.FullName -SourceDirectory $dir -Extension $c.Extension.ToLowerInvariant()
@@ -351,11 +367,16 @@ function Build-FlowGraph {
     }
     $nodeList = @($nodes.Values)
     # Content für alle Knoten nachladen (PS1, BAT, CMD, KIX, VBS), die noch keinen Inhalt haben
+    $totalN = [math]::Max(1, $nodeList.Count)
+    $idxN = 0
     foreach ($n in $nodeList) {
+        $idxN++
+        Write-Progress -Activity 'Graph aufbauen' -Status "Inhalte laden: $($n.DisplayName)" -PercentComplete ([math]::Min(100, [int](100 * $idxN / $totalN)))
         if (-not $n.Content -and $n.FullPath -and (Test-Path -LiteralPath $n.FullPath -ErrorAction SilentlyContinue)) {
             $n.Content = Get-FileContentSafe -Path $n.FullPath
         }
     }
+    Write-Progress -Activity 'Graph aufbauen' -Completed
     # Pro Knoten: Liste der im Code vorkommenden Aufruf-Snippets (für Hervorhebung)
     foreach ($n in $nodeList) {
         $calls = @($edges | Where-Object { $_.SourcePath -eq $n.FullPath } | ForEach-Object { $_.RawCall } | Where-Object { $_ })

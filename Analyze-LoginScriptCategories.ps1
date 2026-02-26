@@ -283,7 +283,11 @@ Write-Host "Gefunden: $($files.Count) Skriptdateien." -ForegroundColor Cyan
 
 $patterns = Get-CategoryPatterns
 $results = [System.Collections.ArrayList]::new()
+$totalFiles = $files.Count
+$fileIdx = 0
 foreach ($f in $files) {
+    $fileIdx++
+    Write-Progress -Activity 'Kategorisiere Skripte' -Status $f.Name -PercentComplete ([math]::Min(100, [int](100 * $fileIdx / $totalFiles)))
     $content = Get-FileContentSafe -Path $f.FullName
     $relativePath = $f.FullName.Substring($rootPath.TrimEnd('\', '/').Length).TrimStart('\', '/')
     if ($null -eq $content) {
@@ -312,6 +316,7 @@ foreach ($f in $files) {
         })
     }
 }
+Write-Progress -Activity 'Kategorisiere Skripte' -Completed
 
 $outResolved = $OutputPath
 if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
