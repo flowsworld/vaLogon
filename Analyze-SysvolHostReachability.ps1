@@ -690,7 +690,19 @@ if (-not $state.Phases.FileScanCompleted -or -not $state.UniqueHosts -or $state.
     Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
 }
 else {
-    $uniqueHosts = @($state.UniqueHosts)
+    $raw = @($state.UniqueHosts)
+    # Alte Checkpoints speichern UniqueHosts teils als Strings; normalisieren zu Objekten mit .Host und .TopFolders.
+    $uniqueHosts = @($raw | ForEach-Object {
+        if ($_ -is [string]) {
+            [pscustomobject]@{ Host = $_; TopFolders = @() }
+        } else {
+            $h = $_.Host
+            $tfs = $_.TopFolders
+            if ($null -eq $tfs) { $tfs = @() }
+            if ($tfs -isnot [array]) { $tfs = @($tfs) }
+            [pscustomobject]@{ Host = $h; TopFolders = @($tfs) }
+        }
+    })
     Write-Host "Gefunden: $($state.FilesScannedCount) Dateien. (aus Checkpoint)" -ForegroundColor Cyan
 }
 $hostToTopFolders = @{}
