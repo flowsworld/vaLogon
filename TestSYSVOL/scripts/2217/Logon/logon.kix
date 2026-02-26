@@ -1,0 +1,4 @@
+; KiXtart Dummy - ruft VBS auf
+CALL "login.vbs"
+RUN "helper.vbs"
+SHELL "map_drives.bat"

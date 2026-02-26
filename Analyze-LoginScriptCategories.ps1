@@ -39,6 +39,45 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:ScriptExtensions = @('.ps1', '.psm1', '.bat', '.cmd', '.vbs', '.kix')
+$script:CheckpointFileName = 'login_script_categories_checkpoint.json'
+$script:CheckpointPath = Join-Path -Path (Get-Location) -ChildPath $script:CheckpointFileName
+
+function Read-Checkpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CheckpointPath
+    )
+    if (-not (Test-Path -LiteralPath $CheckpointPath)) {
+        return $null
+    }
+    try {
+        $json = Get-Content -LiteralPath $CheckpointPath -Raw -ErrorAction Stop
+        $data = $json | ConvertFrom-Json -ErrorAction Stop
+        if (-not $data.Version -or -not $data.ScriptsPath) { return $null }
+        return $data
+    }
+    catch {
+        Write-Warning "Fehler beim Lesen des Checkpoints: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Write-Checkpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State,
+        [Parameter(Mandatory = $true)]
+        [string]$CheckpointPath
+    )
+    try {
+        $State | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $CheckpointPath -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Fehler beim Schreiben des Checkpoints: $($_.Exception.Message)"
+    }
+}
 
 function Get-FileContentSafe {
     [CmdletBinding()]
@@ -176,7 +215,7 @@ function Export-CategoriesReportToHtml {
       <ul class="text-gray-700 space-y-1">
         <li><strong>Dateien gesamt:</strong> $totalFiles</li>
         <li><strong>Durchschnittliche Größe:</strong> $avgKb KB</li>
-$(if ($unreadableCount -gt 0) { "        <li class=\"text-amber-700\"><strong>Nicht lesbar:</strong> $unreadableCount</li>" })
+$(if ($unreadableCount -gt 0) { "        <li class=`"text-amber-700`"><strong>Nicht lesbar:</strong> $unreadableCount</li>" })
       </ul>
     </section>
 "@
@@ -194,7 +233,7 @@ $(if ($unreadableCount -gt 0) { "        <li class=\"text-amber-700\"><strong>Ni
             'Umgebung' { 'bg-cyan-500' }
             default { 'bg-gray-500' }
         }
-        "      <div class=\"mb-2\"><div class=\"flex justify-between text-sm mb-0.5\"><span>$name</span><span>$p % ($cnt)</span></div><div class=\"w-full bg-gray-200 rounded h-4\"><div class=\"$color h-4 rounded\" style=\"width:$p%\" title=\"$name\"></div></div></div>"
+        "      <div class=`"mb-2`"><div class=`"flex justify-between text-sm mb-0.5`"><span>$name</span><span>$p % ($cnt)</span></div><div class=`"w-full bg-gray-200 rounded h-4`"><div class=`"$color h-4 rounded`" style=`"width:$p%`" title=`"$name`"></div></div></div>"
     }) -join "`n"
 
     $dashboardHtml = @"
@@ -219,7 +258,7 @@ $bars
         $primEnc = [System.Net.WebUtility]::HtmlEncode($prim)
         $confEnc = [System.Net.WebUtility]::HtmlEncode($conf)
         $allCatEnc = [System.Net.WebUtility]::HtmlEncode($allCat)
-        [void]$rows.AppendLine("        <tr><td class=\"font-mono text-sm\">$fileNameEnc</td><td class=\"font-mono text-sm text-gray-600\">$relPathEnc</td><td>$primEnc</td><td>$confEnc</td><td class=\"text-sm text-gray-600\">$allCatEnc</td></tr>")
+        [void]$rows.AppendLine("        <tr><td class=`"font-mono text-sm`">$fileNameEnc</td><td class=`"font-mono text-sm text-gray-600`">$relPathEnc</td><td>$primEnc</td><td>$confEnc</td><td class=`"text-sm text-gray-600`">$allCatEnc</td></tr>")
     }
 
     $tableHtml = $rows.ToString()
@@ -277,46 +316,133 @@ if (-not (Test-Path -LiteralPath $ScriptsPath -PathType Container)) {
 $rootResolved = Resolve-Path -Path $ScriptsPath -ErrorAction Stop
 $rootPath = $rootResolved.Path
 
+function New-LoginCategoriesState {
+    param([string]$ScriptsPathValue)
+    return [ordered]@{
+        Version     = 1
+        ScriptsPath = $ScriptsPathValue
+        TimestampUtc= (Get-Date).ToUniversalTime()
+        Inventory   = @()
+        ProcessedFiles = @()
+        Results     = @()
+        Phases      = @{
+            InventoryCompleted      = $false
+            CategorizationCompleted = $false
+            ReportExported          = $false
+        }
+        Errors      = @()
+    }
+}
+
+$state = New-LoginCategoriesState -ScriptsPathValue $rootPath
+$checkpoint = Read-Checkpoint -CheckpointPath $script:CheckpointPath
+if ($checkpoint -and $checkpoint.ScriptsPath -eq $rootPath -and $checkpoint.Version -eq 1) {
+    Write-Host "Checkpoint gefunden, setze fort: $script:CheckpointFileName" -ForegroundColor Yellow
+    $state = [ordered]@{
+        Version        = 1
+        ScriptsPath    = $checkpoint.ScriptsPath
+        TimestampUtc   = $checkpoint.TimestampUtc
+        Inventory      = @($checkpoint.Inventory)
+        ProcessedFiles = @($checkpoint.ProcessedFiles)
+        Results        = @($checkpoint.Results)
+        Phases         = $checkpoint.Phases
+        Errors         = @($checkpoint.Errors)
+    }
+}
+elseif ($checkpoint) {
+    Write-Warning "Checkpoint ignoriert (ScriptsPath oder Version passt nicht)."
+}
+else {
+    Write-Host "Kein Checkpoint gefunden. Starte neuen Lauf." -ForegroundColor Gray
+}
+
 Write-Host "Scanne $rootPath ..." -ForegroundColor Cyan
-$files = Get-ScriptFileInventory -RootPath $rootPath
-Write-Host "Gefunden: $($files.Count) Skriptdateien." -ForegroundColor Cyan
+if (-not $state.Phases.InventoryCompleted -or -not $state.Inventory -or $state.Inventory.Count -eq 0) {
+    $files = Get-ScriptFileInventory -RootPath $rootPath
+    $state.Inventory = @($files | ForEach-Object {
+        [pscustomobject]@{ FullName = $_.FullName; Name = $_.Name; Length = $_.Length }
+    })
+    $state.Phases.InventoryCompleted = $true
+    Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
+}
+else {
+    $files = @($state.Inventory | ForEach-Object { Get-Item -LiteralPath $_.FullName -ErrorAction SilentlyContinue } | Where-Object { $_ })
+}
+Write-Host "Gefunden: $($state.Inventory.Count) Skriptdateien." -ForegroundColor Cyan
 
 $patterns = Get-CategoryPatterns
 $results = [System.Collections.ArrayList]::new()
-$totalFiles = $files.Count
-$fileIdx = 0
-foreach ($f in $files) {
-    $fileIdx++
-    Write-Progress -Activity 'Kategorisiere Skripte' -Status $f.Name -PercentComplete ([math]::Min(100, [int](100 * $fileIdx / $totalFiles)))
-    $content = Get-FileContentSafe -Path $f.FullName
-    $relativePath = $f.FullName.Substring($rootPath.TrimEnd('\', '/').Length).TrimStart('\', '/')
-    if ($null -eq $content) {
-        [void]$results.Add([pscustomobject]@{
-            FullName       = $f.FullName
-            RelativePath   = $relativePath
-            FileName       = $f.Name
-            Size           = $f.Length
-            PrimaryCategory = 'Unbekannt'
-            AllCategories  = @()
-            Confidence     = '—'
-            Unreadable     = $true
-        })
-    }
-    else {
-        $catResult = Get-FileCategoryResult -Content $content -CategoryPatterns $patterns
-        [void]$results.Add([pscustomobject]@{
-            FullName        = $f.FullName
-            RelativePath    = $relativePath
-            FileName        = $f.Name
-            Size            = $f.Length
-            PrimaryCategory = $catResult.PrimaryCategory
-            AllCategories   = $catResult.AllCategories
-            Confidence      = $catResult.Confidence
-            Unreadable      = $false
-        })
-    }
+foreach ($r in @($state.Results)) { [void]$results.Add($r) }
+$processedSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($p in @($state.ProcessedFiles)) { [void]$processedSet.Add([string]$p) }
+
+$totalFiles = [math]::Max(1, $state.Inventory.Count)
+$doneCount = $processedSet.Count
+$remainingCount = [math]::Max(0, $state.Inventory.Count - $doneCount)
+if ($doneCount -gt 0) {
+    Write-Host "Resume: bereits kategorisiert: $doneCount, verbleibend: $remainingCount" -ForegroundColor Yellow
 }
-Write-Progress -Activity 'Kategorisiere Skripte' -Completed
+$batch = 0
+
+try {
+    foreach ($fi in $state.Inventory) {
+        $full = [string]$fi.FullName
+        if ($processedSet.Contains($full)) {
+            continue
+        }
+        $batch++
+        Write-Progress -Activity 'Kategorisiere Skripte' -Status $fi.Name -PercentComplete ([math]::Min(100, [int](100 * $doneCount / $totalFiles)))
+
+        $content = Get-FileContentSafe -Path $full
+        $relativePath = $full.Substring($rootPath.TrimEnd('\', '/').Length).TrimStart('\', '/')
+        if ($null -eq $content) {
+            $res = [pscustomobject]@{
+                FullName        = $full
+                RelativePath    = $relativePath
+                FileName        = $fi.Name
+                Size            = $fi.Length
+                PrimaryCategory = 'Unbekannt'
+                AllCategories   = @()
+                Confidence      = '—'
+                Unreadable      = $true
+            }
+        }
+        else {
+            $catResult = Get-FileCategoryResult -Content $content -CategoryPatterns $patterns
+            $res = [pscustomobject]@{
+                FullName        = $full
+                RelativePath    = $relativePath
+                FileName        = $fi.Name
+                Size            = $fi.Length
+                PrimaryCategory = $catResult.PrimaryCategory
+                AllCategories   = $catResult.AllCategories
+                Confidence      = $catResult.Confidence
+                Unreadable      = $false
+            }
+        }
+
+        [void]$results.Add($res)
+        [void]$processedSet.Add($full)
+        $state.ProcessedFiles = @($processedSet)
+        $state.Results = @($results)
+        $doneCount++
+
+        if ($batch -ge 100) {
+            $batch = 0
+            Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
+        }
+    }
+    $state.Phases.CategorizationCompleted = $true
+    Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
+}
+catch {
+    $state.Errors += [pscustomobject]@{ TimestampUtc = (Get-Date).ToUniversalTime(); Message = $_.Exception.Message }
+    Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
+    throw
+}
+finally {
+    Write-Progress -Activity 'Kategorisiere Skripte' -Completed
+}
 
 $outResolved = $OutputPath
 if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
@@ -327,3 +453,10 @@ if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
 Export-CategoriesReportToHtml -Results $results -OutputFilePath $outResolved
+$state.Phases.ReportExported = $true
+Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
+
+if ($state.Phases.InventoryCompleted -and $state.Phases.CategorizationCompleted -and $state.Phases.ReportExported) {
+    Remove-Item -LiteralPath $script:CheckpointPath -Force -ErrorAction SilentlyContinue
+    Write-Host "Checkpoint gelöscht (Lauf vollständig): $script:CheckpointFileName" -ForegroundColor Green
+}

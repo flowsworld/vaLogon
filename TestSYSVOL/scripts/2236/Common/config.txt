@@ -1,0 +1,9 @@
+# GPO 2236 - Andere Server/URLs
+# UNC:
+# \\fileserver02\home
+# \\printserver02\DefaultPrinter
+# URLs:
+# https://vpn.contoso.local
+# IPs:
+# 192.168.2.20
+# 10.0.1.10

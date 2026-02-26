@@ -1,0 +1,2 @@
+; GPO 2236 KiXtart - nur login.vbs
+CALL "login.vbs"

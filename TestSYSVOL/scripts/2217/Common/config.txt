@@ -1,0 +1,11 @@
+# Server-Liste (für Host-Erreichbarkeitstest)
+# UNC-Pfade:
+# \\fileserver01\users
+# \\dc01\share
+# \\printserver01\HP-Laser
+# URLs:
+# https://intranet.contoso.local
+# http://updateserver
+# IPs (Dummy):
+# 192.168.1.10
+# 10.0.0.5

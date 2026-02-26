@@ -58,6 +58,63 @@ $ErrorActionPreference = 'Stop'
 
 $script:FileExtensions = @('.ps1', '.psm1', '.bat', '.cmd', '.vbs', '.kix', '.txt')
 $script:ExcludedHosts = @('localhost', '127.0.0.1', '0.0.0.0', '::1', '')
+$script:CheckpointFileName = 'sysvol_host_reachability_checkpoint.json'
+$script:CheckpointPath = Join-Path -Path (Get-Location) -ChildPath $script:CheckpointFileName
+
+function Read-Checkpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CheckpointPath
+    )
+    if (-not (Test-Path -LiteralPath $CheckpointPath)) { return $null }
+    try {
+        $json = Get-Content -LiteralPath $CheckpointPath -Raw -ErrorAction Stop
+        $data = $json | ConvertFrom-Json -ErrorAction Stop
+        if (-not $data.Version -or -not $data.ScriptsPath) { return $null }
+        return $data
+    }
+    catch {
+        Write-Warning "Fehler beim Lesen des Checkpoints: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Write-Checkpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State,
+        [Parameter(Mandatory = $true)]
+        [string]$CheckpointPath
+    )
+    try {
+        $State | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $CheckpointPath -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Fehler beim Schreiben des Checkpoints: $($_.Exception.Message)"
+    }
+}
+
+function New-HostReachabilityState {
+    param([string]$ScriptsPathValue)
+    return [ordered]@{
+        Version          = 1
+        ScriptsPath      = $ScriptsPathValue
+        TimestampUtc     = (Get-Date).ToUniversalTime()
+        FilesScannedCount= 0
+        UniqueHosts      = @()
+        HostResults      = @()
+        SubnetScanData   = @()
+        Phases           = @{
+            FileScanCompleted   = $false
+            HostChecksCompleted = $false
+            SubnetScanCompleted = $false
+            ReportExported      = $false
+        }
+        Errors           = @()
+    }
+}
 
 function Get-FileContentSafe {
     [CmdletBinding()]
@@ -317,9 +374,9 @@ function Export-HostReachabilityHtml {
             $open = $r.Ports[$p]
             $c = if ($open) { $badgeOk } else { $badgeFail }
             $t = if ($open) { 'Offen' } else { 'Geschlossen' }
-            "<td><span class=\"$c\" title=\"Port $p\">$t</span></td>"
+            "<td><span class=`"$c`" title=`"Port $p`">$t</span></td>"
         }) -join ''
-        [void]$rows.AppendLine("        <tr><td class=\"font-mono\">$hostEnc</td><td><span class=\"$dnsClass\">$dnsText</span></td><td><span class=\"$pingClass\">$pingText</span></td>$portCells<td><span class=\"$winRmClass\">$winRmText</span></td></tr>")
+        [void]$rows.AppendLine("        <tr><td class=`"font-mono`">$hostEnc</td><td><span class=`"$dnsClass`">$dnsText</span></td><td><span class=`"$pingClass`">$pingText</span></td>$portCells<td><span class=`"$winRmClass`">$winRmText</span></td></tr>")
     }
 
     $html = @"
@@ -374,18 +431,18 @@ $(if ($SubnetScanData.Count -gt 0) {
       $subnetEnc = [System.Net.WebUtility]::HtmlEncode($s.Subnet)
       $count = $s.ReachableIPs.Count
       $ipsEnc = [System.Net.WebUtility]::HtmlEncode(($s.ReachableIPs | Sort-Object) -join ', ')
-      [void]$subnetRows.AppendLine("        <tr><td class=\"font-mono\">$hostEnc</td><td class=\"font-mono\">$subnetEnc</td><td>$count</td><td class=\"font-mono text-sm max-w-md truncate\" title=\"$ipsEnc\">$ipsEnc</td></tr>")
+      [void]$subnetRows.AppendLine("        <tr><td class=`"font-mono`">$hostEnc</td><td class=`"font-mono`">$subnetEnc</td><td>$count</td><td class=`"font-mono text-sm max-w-md truncate`" title=`"$ipsEnc`">$ipsEnc</td></tr>")
     }
-    "    <section class=\"mb-8 bg-white rounded-xl shadow p-4 overflow-x-auto\">
-      <h2 class=\"text-lg font-semibold text-gray-800 mb-3\">Subnet-Scan (pingbare Endpunkte)</h2>
-      <p class=\"text-sm text-gray-600 mb-3\">Pro ermitteltem Host wurde das zugehörige Subnetz (/24) nach erreichbaren (pingbaren) IP-Adressen durchsucht.</p>
-      <table class=\"w-full text-left border-collapse\">
+    "    <section class=`"mb-8 bg-white rounded-xl shadow p-4 overflow-x-auto`">
+      <h2 class=`"text-lg font-semibold text-gray-800 mb-3`">Subnet-Scan (pingbare Endpunkte)</h2>
+      <p class=`"text-sm text-gray-600 mb-3`">Pro ermitteltem Host wurde das zugehörige Subnetz (/24) nach erreichbaren (pingbaren) IP-Adressen durchsucht.</p>
+      <table class=`"w-full text-left border-collapse`">
         <thead>
-          <tr class=\"border-b border-gray-300\">
-            <th class=\"py-2 pr-4\">Quell-Host</th>
-            <th class=\"py-2 pr-4\">Subnetz</th>
-            <th class=\"py-2 pr-4\">Anzahl erreichbar</th>
-            <th class=\"py-2 pr-4\">Erreichbare IPs</th>
+          <tr class=`"border-b border-gray-300`">
+            <th class=`"py-2 pr-4`">Quell-Host</th>
+            <th class=`"py-2 pr-4`">Subnetz</th>
+            <th class=`"py-2 pr-4`">Anzahl erreichbar</th>
+            <th class=`"py-2 pr-4`">Erreichbare IPs</th>
           </tr>
         </thead>
         <tbody>
@@ -414,20 +471,65 @@ if (-not (Test-Path -LiteralPath $ScriptsPath -PathType Container)) {
 $rootResolved = Resolve-Path -Path $ScriptsPath -ErrorAction Stop
 $rootPath = $rootResolved.Path
 
-Write-Host "Scanne $rootPath ..." -ForegroundColor Cyan
-$files = Get-RelevantFiles -RootPath $rootPath
-Write-Host "Gefunden: $($files.Count) Dateien." -ForegroundColor Cyan
+function ConvertTo-OrderedHashtable {
+    param([object]$Obj)
+    if ($null -eq $Obj) { return [ordered]@{} }
+    $h = [ordered]@{}
+    foreach ($p in $Obj.PSObject.Properties) {
+        $h[$p.Name] = $p.Value
+    }
+    return $h
+}
 
-$uniqueHosts = Get-AllUniqueHosts -Files $files -RootPath $rootPath
-Write-Host "Eindeutige Hosts/IPs: $($uniqueHosts.Count)" -ForegroundColor Cyan
-
-if ($uniqueHosts.Count -eq 0) {
-    Write-Host "Keine Hosts gefunden. Leere HTML wird erzeugt." -ForegroundColor Yellow
-    $results = @()
+$state = New-HostReachabilityState -ScriptsPathValue $rootPath
+$checkpoint = Read-Checkpoint -CheckpointPath $script:CheckpointPath
+if ($checkpoint -and $checkpoint.ScriptsPath -eq $rootPath -and $checkpoint.Version -eq 1) {
+    Write-Host "Checkpoint gefunden, setze fort: $script:CheckpointFileName" -ForegroundColor Yellow
+    $state = [ordered]@{
+        Version           = 1
+        ScriptsPath       = $checkpoint.ScriptsPath
+        TimestampUtc      = $checkpoint.TimestampUtc
+        FilesScannedCount = [int]$checkpoint.FilesScannedCount
+        UniqueHosts       = @($checkpoint.UniqueHosts)
+        HostResults       = @($checkpoint.HostResults)
+        SubnetScanData    = @($checkpoint.SubnetScanData)
+        Phases            = $checkpoint.Phases
+        Errors            = @($checkpoint.Errors)
+    }
+}
+elseif ($checkpoint) {
+    Write-Warning "Checkpoint ignoriert (ScriptsPath oder Version passt nicht)."
 }
 else {
-    Write-Progress -Activity 'Erreichbarkeit prüfen' -Status "$($uniqueHosts.Count) Hosts werden geprüft ..." -PercentComplete 0
-    $results = @($uniqueHosts | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
+    Write-Host "Kein Checkpoint gefunden. Starte neuen Lauf." -ForegroundColor Gray
+}
+
+Write-Host "Scanne $rootPath ..." -ForegroundColor Cyan
+$uniqueHosts = @()
+if (-not $state.Phases.FileScanCompleted -or -not $state.UniqueHosts -or $state.UniqueHosts.Count -eq 0) {
+    $files = Get-RelevantFiles -RootPath $rootPath
+    Write-Host "Gefunden: $($files.Count) Dateien." -ForegroundColor Cyan
+    $uniqueHosts = Get-AllUniqueHosts -Files $files -RootPath $rootPath
+    $state.UniqueHosts = @($uniqueHosts)
+    $state.FilesScannedCount = $files.Count
+    $state.Phases.FileScanCompleted = $true
+    Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
+}
+else {
+    $uniqueHosts = @($state.UniqueHosts)
+    Write-Host "Gefunden: $($state.FilesScannedCount) Dateien. (aus Checkpoint)" -ForegroundColor Cyan
+}
+Write-Host "Eindeutige Hosts/IPs: $($uniqueHosts.Count)" -ForegroundColor Cyan
+if ($uniqueHosts.Count -gt 0 -and $checkedSet.Count -gt 0) {
+    Write-Host ("Resume: HostChecks erledigt: {0}/{1}" -f $checkedSet.Count, $uniqueHosts.Count) -ForegroundColor Yellow
+}
+
+function Invoke-HostChecksBatch {
+    param(
+        [string[]]$Hosts,
+        [int]$Throttle
+    )
+    return @($Hosts | ForEach-Object -ThrottleLimit $Throttle -Parallel {
         $h = $_
         $ports = @(80, 443, 445, 135, 3389, 5985)
         function Test-TcpPortInner {
@@ -458,12 +560,63 @@ else {
             WinRmOk = $winRmOk
         }
     })
-    Write-Progress -Activity 'Erreichbarkeit prüfen' -Completed
 }
 
-$subnetScanData = @()
+$resultsList = [System.Collections.ArrayList]::new()
+foreach ($r in @($state.HostResults)) { [void]$resultsList.Add($r) }
+$checkedSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($r in @($resultsList)) { if ($r.Host) { [void]$checkedSet.Add([string]$r.Host) } }
+
+try {
+    if ($uniqueHosts.Count -eq 0) {
+        Write-Host "Keine Hosts gefunden. Leere HTML wird erzeugt." -ForegroundColor Yellow
+    }
+    else {
+        $totalHosts = [math]::Max(1, $uniqueHosts.Count)
+        $remaining = @($uniqueHosts | Where-Object { -not $checkedSet.Contains($_) })
+        if ($remaining.Count -gt 0) {
+            $batchSize = 25
+            for ($i = 0; $i -lt $remaining.Count; $i += $batchSize) {
+                $batch = $remaining[$i..([math]::Min($i + $batchSize - 1, $remaining.Count - 1))]
+                $pct = [math]::Min(100, [int](100 * $checkedSet.Count / $totalHosts))
+                Write-Progress -Activity 'Erreichbarkeit prüfen' -Status ("{0}/{1} Hosts" -f $checkedSet.Count, $uniqueHosts.Count) -PercentComplete $pct
+                $batchResults = Invoke-HostChecksBatch -Hosts $batch -Throttle $ThrottleLimit
+                foreach ($br in $batchResults) {
+                    if ($br.Host -and -not $checkedSet.Contains($br.Host)) {
+                        [void]$resultsList.Add($br)
+                        [void]$checkedSet.Add([string]$br.Host)
+                    }
+                }
+                $state.HostResults = @($resultsList)
+                Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
+            }
+        }
+        Write-Progress -Activity 'Erreichbarkeit prüfen' -Completed
+        if ($checkedSet.Count -ge $uniqueHosts.Count) {
+            $state.Phases.HostChecksCompleted = $true
+            Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
+        }
+    }
+}
+catch {
+    $state.Errors += [pscustomobject]@{ TimestampUtc = (Get-Date).ToUniversalTime(); Message = $_.Exception.Message }
+    Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
+    throw
+}
+
+$results = @($resultsList)
+
+$subnetScanData = [System.Collections.ArrayList]::new()
+foreach ($s in @($state.SubnetScanData)) { [void]$subnetScanData.Add($s) }
+if ($SubnetScan -and $subnetScanData.Count -gt 0) {
+    Write-Host ("Resume: Subnet-Scans vorhanden: {0}" -f $subnetScanData.Count) -ForegroundColor Yellow
+}
+
 if ($SubnetScan -and $results.Count -gt 0) {
     Write-Host "Ermittle Subnetze und scanne nach pingbaren Endpunkten ..." -ForegroundColor Cyan
+    $scannedSubnetSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($s in @($subnetScanData)) { if ($s.Subnet) { [void]$scannedSubnetSet.Add([string]$s.Subnet) } }
+
     $subnetToHosts = @{}
     foreach ($r in $results) {
         $ip = Get-IPv4ForHost -HostOrIp $r.Host
@@ -478,23 +631,34 @@ if ($SubnetScan -and $results.Count -gt 0) {
             [void]$subnetToHosts[$subnetKey].Add($r.Host)
         }
     }
+
+    $allSubnets = @($subnetToHosts.Keys)
+    $totalSubnets = [math]::Max(1, $allSubnets.Count)
     $idx = 0
-    $totalSubnets = $subnetToHosts.Count
-    foreach ($subnetKey in $subnetToHosts.Keys) {
+    foreach ($subnetKey in $allSubnets) {
         $idx++
+        if ($scannedSubnetSet.Contains($subnetKey)) { continue }
         Write-Progress -Activity 'Subnet-Scan' -Status $subnetKey -PercentComplete ([math]::Min(100, [int](100 * $idx / $totalSubnets)))
         $info = Get-SubnetBaseAndRange -Ip ($subnetKey -replace '\.0/\d+$', '.1') -PrefixLength $SubnetPrefixLength
-        if (-not $info -or $info.Last -eq $null) { continue }
+        if (-not $info -or $null -eq $info.Last) { continue }
         $reachable = Get-PingableIPsInSubnet -SubnetBase $info.Base -First $info.First -Last $info.Last -Throttle $ThrottleLimit
         $sourceHosts = @($subnetToHosts[$subnetKey])
-        $subnetScanData += [pscustomobject]@{
-            SourceHost  = ($sourceHosts -join ', ')
-            Subnet      = $subnetKey
+        $entry = [pscustomobject]@{
+            SourceHost   = ($sourceHosts -join ', ')
+            Subnet       = $subnetKey
             ReachableIPs = @($reachable)
         }
+        [void]$subnetScanData.Add($entry)
+        [void]$scannedSubnetSet.Add($subnetKey)
+        $state.SubnetScanData = @($subnetScanData)
+        Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
     }
     Write-Progress -Activity 'Subnet-Scan' -Completed
+    $state.Phases.SubnetScanCompleted = $true
+    Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
 }
+
+$subnetScanDataFinal = @($subnetScanData)
 
 $outResolved = $OutputPath
 if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
@@ -504,4 +668,11 @@ $outDir = [System.IO.Path]::GetDirectoryName($outResolved)
 if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
-Export-HostReachabilityHtml -Results $results -OutputFilePath $outResolved -FilesScanned $files.Count -SubnetScanData $subnetScanData
+Export-HostReachabilityHtml -Results $results -OutputFilePath $outResolved -FilesScanned $state.FilesScannedCount -SubnetScanData $subnetScanDataFinal
+$state.Phases.ReportExported = $true
+Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
+
+if ($state.Phases.FileScanCompleted -and $state.Phases.HostChecksCompleted -and (($SubnetScan -and $state.Phases.SubnetScanCompleted) -or (-not $SubnetScan)) -and $state.Phases.ReportExported) {
+    Remove-Item -LiteralPath $script:CheckpointPath -Force -ErrorAction SilentlyContinue
+    Write-Host "Checkpoint gelöscht (Lauf vollständig): $script:CheckpointFileName" -ForegroundColor Green
+}
