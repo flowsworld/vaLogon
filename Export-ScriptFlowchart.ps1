@@ -669,12 +669,38 @@ function Export-ScriptFlowchartToHtml {
     $topFoldersList = @($nodesWithTop | ForEach-Object { $_.TopFolder } | Sort-Object -Unique)
 
     $reportNodes = @($nodesWithTop | ForEach-Object {
+        $node = $_.Node
+        $top  = $_.TopFolder
+        $full = $node.FullPath
+        $isExternal = $false
+        $relative = $full
+        $folderDepth = 0
+        if ($full) {
+            if ($full.StartsWith($rootTrimmed, [StringComparison]::OrdinalIgnoreCase)) {
+                $relative = $full.Substring($rootTrimmed.Length).TrimStart('\', '/')
+                $segments = $relative -split '[\\/]'
+                if ($segments.Length -gt 1) {
+                    # Verzeichnis-Tiefe relativ zu RootPath (Anzahl Verzeichnisse)
+                    $folderDepth = $segments.Length - 1
+                }
+                else {
+                    $folderDepth = 0
+                }
+            }
+            else {
+                # Ziel außerhalb von ScriptsPath
+                $isExternal = $true
+            }
+        }
         [ordered]@{
-            id          = $_.Node.Id
-            fullPath    = $_.Node.FullPath
-            displayName = $_.Node.DisplayName
-            type        = $_.Node.Type
-            topFolder   = $_.TopFolder
+            id           = $node.Id
+            fullPath     = $full
+            displayName  = $node.DisplayName
+            type         = $node.Type
+            topFolder    = $top
+            relativePath = $relative
+            folderDepth  = $folderDepth
+            isExternal   = $isExternal
         }
     })
     $reportEdges = @($Graph.Edges | ForEach-Object {
@@ -754,7 +780,7 @@ $(if ($hasLinks) { "      <p class=`"text-xs text-amber-700 mb-1`">$legendText</
     </section>
 "@)
     }
-    $filterScript = @'
+$filterScript = @"
 (function() {
   var selectTop = document.getElementById('filter-topfolder');
   var selectType = document.getElementById('filter-type');
@@ -769,17 +795,66 @@ $(if ($hasLinks) { "      <p class=`"text-xs text-amber-700 mb-1`">$legendText</
     if (!s) return '';
     return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\[/g, '\\[').replace(/\]/g, '\\]');
   }
-  function buildMermaidCode(filteredNodes, filteredEdges) {
+  function buildMermaidCode(filteredNodes, filteredEdges, topVal) {
+    if (!filteredNodes || filteredNodes.length === 0) {
+      return '';
+    }
     var pathSet = {};
-    filteredNodes.forEach(function(n) { pathSet[n.fullPath] = true; });
     var idByPath = {};
-    filteredNodes.forEach(function(n) { idByPath[n.fullPath] = n.id; });
-    var lines = ['flowchart LR', '  direction TB'];
+    var nodeById = {};
     filteredNodes.forEach(function(n) {
-      var typeLabel = n.type || '';
-      var label = typeLabel ? n.displayName + ' (' + typeLabel + ')' : n.displayName;
-      lines.push('  ' + n.id + '["' + escapeMermaidLabel(label) + '"]');
+      pathSet[n.fullPath] = true;
+      idByPath[n.fullPath] = n.id;
+      nodeById[n.id] = n;
     });
+    var lines = ['flowchart LR', '  direction TB'];
+
+    // Knoten nach Ordner-Ebene (folderDepth) und externen Zielen gruppieren
+    var depthMap = {};   // depth -> [nodeId]
+    var externalIds = [];
+    filteredNodes.forEach(function(n) {
+      if (n.isExternal) {
+        externalIds.push(n.id);
+        return;
+      }
+      var d = typeof n.folderDepth === 'number' ? n.folderDepth : 0;
+      if (!depthMap[d]) depthMap[d] = [];
+      depthMap[d].push(n.id);
+    });
+
+    // Subgraphs nach Ebene
+    var depthKeys = Object.keys(depthMap).map(function(k) { return parseInt(k, 10); }).sort(function(a, b) { return a - b; });
+    depthKeys.forEach(function(d) {
+      var sgId = 'level' + d;
+      var label;
+      if (d === 0 && (!topVal || topVal === '')) {
+        label = 'Root';
+      } else {
+        label = 'Ebene ' + d;
+      }
+      lines.push('  subgraph ' + sgId + ' ["' + escapeMermaidLabel(label) + '"]');
+      depthMap[d].forEach(function(nodeId) {
+        var n = nodeById[nodeId];
+        if (!n) return;
+        var typeLabel = n.type || '';
+        var lbl = typeLabel ? n.displayName + ' (' + typeLabel + ')' : n.displayName;
+        lines.push('    ' + n.id + '["' + escapeMermaidLabel(lbl) + '"]');
+      });
+      lines.push('  end');
+    });
+
+    // Externe Ziele in eigene Spalte
+    if (externalIds.length > 0) {
+      lines.push('  subgraph external ["Extern"]');
+      externalIds.forEach(function(nodeId) {
+        var n = nodeById[nodeId];
+        if (!n) return;
+        var typeLabel = n.type || '';
+        var lbl = typeLabel ? n.displayName + ' (' + typeLabel + ')' : n.displayName;
+        lines.push('    ' + n.id + '["' + escapeMermaidLabel(lbl) + '"]');
+      });
+      lines.push('  end');
+    }
     var edgeIndex = 0;
     var crossBoundaryIndices = [];
     filteredEdges.forEach(function(e) {
@@ -823,7 +898,7 @@ $(if ($hasLinks) { "      <p class=`"text-xs text-amber-700 mb-1`">$legendText</
     var filteredEdges = edges.filter(function(e) {
       return pathSet[e.sourcePath] && pathSet[e.targetPath];
     });
-    var code = buildMermaidCode(filteredNodes, filteredEdges);
+    var code = buildMermaidCode(filteredNodes, filteredEdges, topVal);
     renderMermaid(code);
     sections.forEach(function(sec) {
       var tf = sec.getAttribute('data-topfolder') || '';
@@ -837,7 +912,7 @@ $(if ($hasLinks) { "      <p class=`"text-xs text-amber-700 mb-1`">$legendText</
   if (selectType) selectType.addEventListener('change', applyFilter);
   applyFilter();
 })();
-'@
+"@
     $html = @"
 <!DOCTYPE html>
 <html lang="de">
