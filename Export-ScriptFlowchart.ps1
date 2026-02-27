@@ -467,6 +467,14 @@ function Build-FlowGraph {
             if ($processedVbs.Contains($v.FullName)) { continue }
             $content = $nodes[$v.FullName].Content
             if (-not $content) { $content = Get-FileContentSafe -Path $v.FullName }
+            # In einigen Umgebungen schlagen Funktionsaufrufe mit leerem String für -Content fehl.
+            # Leere Dateien überspringen wir deshalb an dieser Stelle.
+            if ([string]::IsNullOrEmpty($content)) {
+                [void]$processedVbs.Add($v.FullName)
+                $batch++
+                if ($batch -ge 50) { $batch = 0; & $persist $null }
+                continue
+            }
             $dir = $v.DirectoryName
             $outEdges = Get-VbsCallsFromContent -Content $content -SourcePath $v.FullName -SourceDirectory $dir
             foreach ($e in $outEdges) {
@@ -496,6 +504,12 @@ function Build-FlowGraph {
             Write-Progress -Activity 'Graph aufbauen' -Status "Aufrufer parsen: $($c.Name)" -PercentComplete ([math]::Min(100, [int](100 * $idxC / $totalC)))
             if ($processedCallers.Contains($c.FullName)) { continue }
             $content = Get-FileContentSafe -Path $c.FullName
+            if ([string]::IsNullOrEmpty($content)) {
+                [void]$processedCallers.Add($c.FullName)
+                $batch++
+                if ($batch -ge 50) { $batch = 0; & $persist $null }
+                continue
+            }
             $dir = $c.DirectoryName
             $outEdges = Get-CallersOfVbs -Content $content -SourcePath $c.FullName -SourceDirectory $dir -Extension $c.Extension.ToLowerInvariant()
             foreach ($e in $outEdges) {
