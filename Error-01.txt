@@ -1,0 +1,9 @@
+PS C:\Users\S527189\OneDrive - voestalpine\Dokumente\VSCode\vaLogon> .\Export-ScriptFlowchart.ps1 -ScriptsPath '\\voestalpine\SYSVOL\voestalpine.root.local\scripts'
+Scanne \\voestalpine\SYSVOL\voestalpine.root.local\scripts ...
+Gefunden: 836 VBS-Dateien, 8198 Aufrufer (BAT/CMD/PS1/KIX) in 102 Top-Ordner(n).
+Verarbeite Top-Ordner '2117' (VBS: 6, Aufrufer: 6) ...
+Build-FlowGraph: C:\Users\S527189\OneDrive - voestalpine\Dokumente\VSCode\vaLogon\Export-ScriptFlowchart.ps1:1199
+Line |
+1199 |  … graphPart = Build-FlowGraph -VbsFiles $topVbsFiles -CallerFiles $topC …
+     |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Cannot bind argument to parameter 'Edges' because it is an empty array.
