@@ -43,8 +43,6 @@ $script:MaxFileBytes = 1MB
 $script:VbsExtensions = @('.vbs')
 $script:CallerExtensions = @('.bat', '.cmd', '.ps1', '.psm1', '.kix')
 $script:AllScriptExtensions = @('.vbs', '.bat', '.cmd', '.ps1', '.psm1', '.kix')
-$script:CheckpointFileName = 'script_flowchart_checkpoint.json'
-$script:CheckpointPath = Join-Path -Path (Get-Location) -ChildPath $script:CheckpointFileName
 
 function Read-Checkpoint {
     [CmdletBinding()]
@@ -82,25 +80,29 @@ function Write-Checkpoint {
 }
 
 function New-VbsFlowState {
-    param([string]$ScriptsPathValue)
+    param(
+        [string]$ScriptsPathValue,
+        [string]$TopFolder
+    )
     return [ordered]@{
-        Version     = 1
-        ScriptsPath = $ScriptsPathValue
-        TimestampUtc= (Get-Date).ToUniversalTime()
-        VbsFiles    = @()
-        CallerFiles = @()
-        Nodes       = @()
-        Edges       = @()
-        ProcessedVbs    = @()
-        ProcessedCallers= @()
-        Phases      = @{
-            InventoryCompleted   = $false
-            ParseVbsCompleted    = $false
-            ParseCallersCompleted= $false
-            ContentLoadCompleted = $false
-            HtmlExported         = $false
+        Version      = 1
+        ScriptsPath  = $ScriptsPathValue
+        TopFolder    = $TopFolder
+        TimestampUtc = (Get-Date).ToUniversalTime()
+        VbsFiles     = @()
+        CallerFiles  = @()
+        Nodes        = @()
+        Edges        = @()
+        ProcessedVbs     = @()
+        ProcessedCallers = @()
+        Phases       = @{
+            InventoryCompleted    = $false
+            ParseVbsCompleted     = $false
+            ParseCallersCompleted = $false
+            ContentLoadCompleted  = $false
+            HtmlExported          = $false
         }
-        Errors      = @()
+        Errors       = @()
     }
 }
 
@@ -1102,52 +1104,148 @@ $rootResolved = Resolve-Path -Path $ScriptsPath -ErrorAction Stop
 # damit $rootPath zum Format von $v.FullName / $c.FullName passt.
 $rootPath = $rootResolved.ProviderPath
 
-$state = New-VbsFlowState -ScriptsPathValue $rootPath
-$checkpoint = Read-Checkpoint -CheckpointPath $script:CheckpointPath
-if ($checkpoint -and $checkpoint.ScriptsPath -eq $rootPath -and $checkpoint.Version -eq 1) {
-    Write-Host "Checkpoint gefunden, setze fort: $script:CheckpointFileName" -ForegroundColor Yellow
-    $state = [ordered]@{
-        Version          = 1
-        ScriptsPath      = $checkpoint.ScriptsPath
-        TimestampUtc     = $checkpoint.TimestampUtc
-        VbsFiles         = @($checkpoint.VbsFiles)
-        CallerFiles      = @($checkpoint.CallerFiles)
-        Nodes            = @($checkpoint.Nodes)
-        Edges            = @($checkpoint.Edges)
-        ProcessedVbs     = @($checkpoint.ProcessedVbs)
-        ProcessedCallers = @($checkpoint.ProcessedCallers)
-        Phases           = $checkpoint.Phases
-        Errors           = @($checkpoint.Errors)
-    }
-}
-elseif ($checkpoint) {
-    Write-Warning "Checkpoint ignoriert (ScriptsPath oder Version passt nicht)."
-}
-else {
-    Write-Host "Kein Checkpoint gefunden. Starte neuen Lauf." -ForegroundColor Gray
-}
-
 Write-Host "Scanne $rootPath ..." -ForegroundColor Cyan
-if (-not $state.Phases.InventoryCompleted -or -not $state.VbsFiles -or -not $state.CallerFiles) {
-    $vbsFiles, $callerFiles = Get-AllRelevantFiles -RootPath $rootPath
-    $state.VbsFiles = @($vbsFiles | ForEach-Object { $_.FullName })
-    $state.CallerFiles = @($callerFiles | ForEach-Object { $_.FullName })
-    $state.Phases.InventoryCompleted = $true
-    Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
-}
-else {
-    $vbsFiles = @($state.VbsFiles | ForEach-Object { Get-Item -LiteralPath $_ -ErrorAction SilentlyContinue } | Where-Object { $_ })
-    $callerFiles = @($state.CallerFiles | ForEach-Object { Get-Item -LiteralPath $_ -ErrorAction SilentlyContinue } | Where-Object { $_ })
-}
-Write-Host "Gefunden: $($vbsFiles.Count) VBS-Dateien, $($callerFiles.Count) Aufrufer (BAT/CMD/PS1/KIX)." -ForegroundColor Cyan
-if ($state.ProcessedVbs.Count -gt 0 -or $state.ProcessedCallers.Count -gt 0) {
-    Write-Host ("Resume: VBS verarbeitet: {0}/{1}; Aufrufer verarbeitet: {2}/{3}" -f $state.ProcessedVbs.Count, $vbsFiles.Count, $state.ProcessedCallers.Count, $callerFiles.Count) -ForegroundColor Yellow
-}
+$vbsFiles, $callerFiles = Get-AllRelevantFiles -RootPath $rootPath
+
 if ($vbsFiles.Count -eq 0 -and $callerFiles.Count -eq 0) {
     Write-Warning "Keine VBS-Dateien oder Aufrufer gefunden. Leere HTML wird trotzdem erzeugt."
 }
 
-$graph = Build-FlowGraph -VbsFiles $vbsFiles -CallerFiles $callerFiles -RootPath $rootPath -State $state -CheckpointPath $script:CheckpointPath
+# Dateien nach Top-Ordner gruppieren
+$groups = @{}
+foreach ($v in $vbsFiles) {
+    $top = Get-NodeTopFolder -FullPath $v.FullName -RootPath $rootPath
+    if (-not $groups.ContainsKey($top)) {
+        $groups[$top] = [ordered]@{ VbsFiles = @(); CallerFiles = @() }
+    }
+    $groups[$top].VbsFiles += $v
+}
+foreach ($c in $callerFiles) {
+    $top = Get-NodeTopFolder -FullPath $c.FullName -RootPath $rootPath
+    if (-not $groups.ContainsKey($top)) {
+        $groups[$top] = [ordered]@{ VbsFiles = @(); CallerFiles = @() }
+    }
+    $groups[$top].CallerFiles += $c
+}
+
+Write-Host ("Gefunden: {0} VBS-Dateien, {1} Aufrufer (BAT/CMD/PS1/KIX) in {2} Top-Ordner(n)." -f $vbsFiles.Count, $callerFiles.Count, $groups.Keys.Count) -ForegroundColor Cyan
+
+# Aggregierte Ergebnisstrukturen
+$allNodesByPath = @{}
+$allEdges = @()
+$allEdgeKeys = @{}
+$checkpointPaths = @()
+
+foreach ($top in ($groups.Keys | Sort-Object)) {
+    $group = $groups[$top]
+    $topVbsFiles = $group.VbsFiles
+    $topCallerFiles = $group.CallerFiles
+
+    Write-Host ("Verarbeite Top-Ordner '{0}' (VBS: {1}, Aufrufer: {2}) ..." -f $top, $topVbsFiles.Count, $topCallerFiles.Count) -ForegroundColor Cyan
+
+    if ($topVbsFiles.Count -eq 0 -and $topCallerFiles.Count -eq 0) {
+        Write-Warning "Top-Ordner '$top' hat keine VBS-Dateien oder Aufrufer. Überspringe Graphaufbau."
+        continue
+    }
+
+    $topSafe = $top -replace '[^A-Za-z0-9_\-]', '_'
+    if ([string]::IsNullOrWhiteSpace($topSafe)) { $topSafe = 'Root' }
+    $checkpointFileName = "script_flowchart_checkpoint_$topSafe.json"
+    $checkpointPath = Join-Path -Path (Get-Location) -ChildPath $checkpointFileName
+    $checkpointPaths += $checkpointPath
+
+    $state = $null
+    $checkpoint = Read-Checkpoint -CheckpointPath $checkpointPath
+    if ($checkpoint -and $checkpoint.ScriptsPath -eq $rootPath -and $checkpoint.Version -eq 1 -and $checkpoint.TopFolder -eq $top) {
+        Write-Host "Checkpoint für Top-Ordner '$top' gefunden, setze fort: $checkpointFileName" -ForegroundColor Yellow
+        $state = [ordered]@{
+            Version          = 1
+            ScriptsPath      = $checkpoint.ScriptsPath
+            TopFolder        = $checkpoint.TopFolder
+            TimestampUtc     = $checkpoint.TimestampUtc
+            VbsFiles         = @($checkpoint.VbsFiles)
+            CallerFiles      = @($checkpoint.CallerFiles)
+            Nodes            = @($checkpoint.Nodes)
+            Edges            = @($checkpoint.Edges)
+            ProcessedVbs     = @($checkpoint.ProcessedVbs)
+            ProcessedCallers = @($checkpoint.ProcessedCallers)
+            Phases           = $checkpoint.Phases
+            Errors           = @($checkpoint.Errors)
+        }
+    }
+    elseif ($checkpoint) {
+        Write-Warning "Checkpoint für Top-Ordner '$top' ignoriert (ScriptsPath, Version oder TopFolder passt nicht)."
+    }
+
+    if (-not $state) {
+        $state = New-VbsFlowState -ScriptsPathValue $rootPath -TopFolder $top
+    }
+
+    if (-not $state.Phases.InventoryCompleted -or -not $state.VbsFiles -or -not $state.CallerFiles) {
+        $state.VbsFiles = @($topVbsFiles | ForEach-Object { $_.FullName })
+        $state.CallerFiles = @($topCallerFiles | ForEach-Object { $_.FullName })
+        $state.Phases.InventoryCompleted = $true
+        Write-Checkpoint -State $state -CheckpointPath $checkpointPath
+    }
+    else {
+        $topVbsFiles = @($state.VbsFiles | ForEach-Object { Get-Item -LiteralPath $_ -ErrorAction SilentlyContinue } | Where-Object { $_ })
+        $topCallerFiles = @($state.CallerFiles | ForEach-Object { Get-Item -LiteralPath $_ -ErrorAction SilentlyContinue } | Where-Object { $_ })
+    }
+
+    if ($state.ProcessedVbs.Count -gt 0 -or $state.ProcessedCallers.Count -gt 0) {
+        Write-Host ("Resume für Top-Ordner '{0}': VBS verarbeitet: {1}/{2}; Aufrufer verarbeitet: {3}/{4}" -f $top, $state.ProcessedVbs.Count, $topVbsFiles.Count, $state.ProcessedCallers.Count, $topCallerFiles.Count) -ForegroundColor Yellow
+    }
+
+    $graphPart = Build-FlowGraph -VbsFiles $topVbsFiles -CallerFiles $topCallerFiles -RootPath $rootPath -State $state -CheckpointPath $checkpointPath
+
+    foreach ($n in $graphPart.Nodes) {
+        if (-not $n.FullPath) { continue }
+        if (-not $allNodesByPath.ContainsKey($n.FullPath)) {
+            $allNodesByPath[$n.FullPath] = $n
+        }
+    }
+
+    foreach ($e in $graphPart.Edges) {
+        if (-not $e.SourcePath -or -not $e.TargetPath) { continue }
+        $edgeKey = "$($e.SourcePath)->$($e.TargetPath)"
+        if (-not $allEdgeKeys.ContainsKey($edgeKey)) {
+            $allEdgeKeys[$edgeKey] = $true
+            $allEdges += $e
+        }
+    }
+}
+
+$combinedNodes = @($allNodesByPath.Values)
+
+if ($combinedNodes.Count -gt 0 -and $allEdges.Count -gt 0) {
+    $recInfoCombined = Get-RecursiveInfo -Nodes $combinedNodes -Edges $allEdges
+    $recursiveNodesCombined = $recInfoCombined.RecursiveNodes
+    $recursiveEdgesCombined = $recInfoCombined.RecursiveEdges
+
+    foreach ($n in $combinedNodes) {
+        $isRec = $false
+        if ($n.FullPath -and $recursiveNodesCombined.ContainsKey($n.FullPath)) {
+            $isRec = $true
+        }
+        $n | Add-Member -NotePropertyName 'IsRecursive' -NotePropertyValue $isRec -Force
+    }
+
+    foreach ($e in $allEdges) {
+        $key = "$($e.SourcePath)->$($e.TargetPath)"
+        $isRec = $false
+        if ($e.SourcePath -and $e.TargetPath -and $recursiveEdgesCombined.ContainsKey($key)) {
+            $isRec = $true
+        }
+        $e | Add-Member -NotePropertyName 'IsRecursive' -NotePropertyValue $isRec -Force
+    }
+}
+
+$combinedGraph = [pscustomobject]@{
+    Nodes     = $combinedNodes
+    Edges     = $allEdges
+    GetNodeId = $null
+}
+
 $outResolved = $OutputPath
 if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
     $outResolved = Join-Path -Path (Get-Location) -ChildPath $OutputPath
@@ -1156,11 +1254,11 @@ $outDir = [System.IO.Path]::GetDirectoryName($outResolved)
 if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
-Export-ScriptFlowchartToHtml -Graph $graph -OutputFilePath $outResolved -RootPath $rootPath -EnableGlobalView:$EnableGlobalView
-$state.Phases.HtmlExported = $true
-Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
 
-if ($state.Phases.InventoryCompleted -and $state.Phases.ParseVbsCompleted -and $state.Phases.ParseCallersCompleted -and $state.Phases.ContentLoadCompleted -and $state.Phases.HtmlExported) {
-    Remove-Item -LiteralPath $script:CheckpointPath -Force -ErrorAction SilentlyContinue
-    Write-Host "Checkpoint gelöscht (Lauf vollständig): $script:CheckpointFileName" -ForegroundColor Green
+Export-ScriptFlowchartToHtml -Graph $combinedGraph -OutputFilePath $outResolved -RootPath $rootPath -EnableGlobalView:$EnableGlobalView
+
+foreach ($cp in ($checkpointPaths | Sort-Object -Unique)) {
+    if (Test-Path -LiteralPath $cp) {
+        Remove-Item -LiteralPath $cp -Force -ErrorAction SilentlyContinue
+    }
 }
