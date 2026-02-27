@@ -1,8 +1,0 @@
-PS C:\Users\S527189\OneDrive - voestalpine\Dokumente\VSCode\vaLogon> .\Export-ScriptFlowchart.ps1 -ScriptsPath '\\voestalpine\SYSVOL\voestalpine.root.local\scripts'
-Checkpoint gefunden, setze fort: script_flowchart_checkpoint.json
-Scanne Microsoft.PowerShell.Core\FileSystem::\\voestalpine\SYSVOL\voestalpine.root.local\scripts ...
-Gefunden: 836 VBS-Dateien, 8198 Aufrufer (BAT/CMD/PS1/KIX).
-Resume: VBS verarbeitet: 836/836; Aufrufer verarbeitet: 5900/8198
-Graph aufbauen [Aufrufer parsen: ELO_LOGIN.bat                                                                       ]
-
-Das Script scheint bei der Verarbeitung zu hängen.
