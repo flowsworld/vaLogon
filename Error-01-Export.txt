@@ -1,0 +1,9 @@
+PS C:\Users\S527189\OneDrive - voestalpine\Dokumente\VSCode\vaLogon> .\Export-ScriptFlowchart.ps1 -ScriptsPath '\\voestalpine\SYSVOL\voestalpine.root.local\scripts'       
+Kein Checkpoint gefunden. Starte neuen Lauf.
+Scanne Microsoft.PowerShell.Core\FileSystem::\\voestalpine\SYSVOL\voestalpine.root.local\scripts ...
+Gefunden: 836 VBS-Dateien, 8198 Aufrufer (BAT/CMD/PS1/KIX).
+Build-FlowGraph: C:\Users\S527189\OneDrive - voestalpine\Dokumente\VSCode\vaLogon\Export-ScriptFlowchart.ps1:926:10
+Line |
+ 926 |  $graph = Build-FlowGraph -VbsFiles $vbsFiles -CallerFiles $callerFile …
+     |           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Cannot bind argument to parameter 'Content' because it is an empty string.
