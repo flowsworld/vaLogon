@@ -79,7 +79,7 @@ Der Fokus liegt auf **Security**, **Abhängigkeiten**, **Nutzung**, **Duplikaten
   Eigenständiges Skript für einen **Skript-Flowchart** (VBS, BAT, CMD, PS1, PSM1, KIX) als HTML:
   - Findet alle Skriptdateien unter `ScriptsPath` und löst Aufrufbeziehungen auf (wer ruft wen auf).
   - Erzeugt eine einzelne HTML-Datei mit **Mermaid**-Flowchart und **Tailwind**-Layout; pro Skript wird der Quellcode in `<pre><code>` ausgegeben; Verweise über Top-Ordner-Grenzen werden gelb/rot hervorgehoben.
-  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\ScriptFlowchart.html`), `-Encoding` (Fallback für Skriptdateien).
+  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\ScriptFlowchart.html`), `-EnableGlobalView` (optional, siehe unten), `-Encoding` (Fallback für Skriptdateien).
 
 - `Analyze-LoginScriptCategories.ps1`  
   Eigenständiges Skript zur **statistischen Kategorie-Analyse** von Anmeldeskripten:
@@ -150,9 +150,11 @@ pwsh.exe -File .\Export-ScriptFlowchart.ps1 `
     -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
 ```
 
-Optional: `-OutputPath 'D:\Reports\ScriptFlow.html'`, `-Encoding` (Fallback-Encoding für Skriptdateien).
+Optional: `-OutputPath 'D:\Reports\ScriptFlow.html'`, `-Encoding` (Fallback-Encoding für Skriptdateien), `-EnableGlobalView` (Gesamt-Ansicht über alle Top-Ordner aktivieren).
 
-Das Skript erkennt Aufrufe zwischen **VBS**, **BAT/CMD**, **PowerShell** (PS1/PSM1) und **KiXtart** (KIX). Die HTML-Datei enthält ein Mermaid-Flowchart (Pfeil = „ruft auf“), Filter nach Top-Ordner und Dateityp, sowie pro Skript den Quellcode mit hervorgehobenen Verlinkungen (gelb = gleicher Top-Ordner, rot = über Grenzen). Checkpoint/Resume: `script_flowchart_checkpoint.json` im Arbeitsverzeichnis.
+Das Skript erkennt Aufrufe zwischen **VBS**, **BAT/CMD**, **PowerShell** (PS1/PSM1) und **KiXtart** (KIX). Die HTML-Datei enthält ein Mermaid-Flowchart (Pfeil = „ruft auf“), Filter nach Top-Ordner und Dateityp, sowie pro Skript den Quellcode mit hervorgehobenen Verlinkungen (gelb = gleicher Top-Ordner, rot = über Grenzen).  
+Standardmäßig werden im Flowchart nur gefilterte Sichten pro Top-Ordner / Dateityp dargestellt; mit `-EnableGlobalView` kann zusätzlich eine **Gesamt-Ansicht** (alle Top-Ordner gemeinsam) eingeblendet werden – dies kann bei sehr großen Umgebungen deutlich mehr Ressourcen verbrauchen.  
+Checkpoint/Resume: `script_flowchart_checkpoint.json` im Arbeitsverzeichnis.
 
 #### Login-Skript Kategorien (statistische Analyse)
 

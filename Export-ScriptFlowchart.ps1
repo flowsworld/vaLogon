@@ -31,6 +31,8 @@ param(
 
     [string]$OutputPath = ".\ScriptFlowchart.html",
 
+    [switch]$EnableGlobalView,
+
     [System.Text.Encoding]$Encoding = [System.Text.Encoding]::UTF8
 )
 
@@ -659,7 +661,8 @@ function Export-ScriptFlowchartToHtml {
         [Parameter(Mandatory = $true)]
         [string]$OutputFilePath,
         [Parameter(Mandatory = $true)]
-        [string]$RootPath
+        [string]$RootPath,
+        [switch]$EnableGlobalView
     )
     $rootTrimmed = $RootPath.TrimEnd('\', '/')
     $nodesWithTop = @($Graph.Nodes | ForEach-Object {
@@ -713,8 +716,11 @@ function Export-ScriptFlowchartToHtml {
     $reportData = @{ nodes = $reportNodes; edges = $reportEdges } | ConvertTo-Json -Depth 3 -Compress
     $reportDataEscaped = $reportData -replace '</', '\u003c/'
 
-    $mermaidGesamt = Get-MermaidFlowchart -Graph $Graph
-    $mermaidGesamtSafe = Get-HtmlSafeMermaid -MermaidCode $mermaidGesamt
+    $mermaidGesamtSafe = ''
+    if ($EnableGlobalView) {
+        $mermaidGesamt = Get-MermaidFlowchart -Graph $Graph
+        $mermaidGesamtSafe = Get-HtmlSafeMermaid -MermaidCode $mermaidGesamt
+    }
     $flowchartContainerHtml = @"
     <div class="flowchart-container">
       <div id="mermaid-target" class="mermaid">$mermaidGesamtSafe</div>
@@ -725,6 +731,7 @@ function Export-ScriptFlowchartToHtml {
         $enc = [System.Net.WebUtility]::HtmlEncode($_)
         "        <option value=`"$enc`">$enc</option>"
     }) -join "`n"
+    $gesamtOptionLine = if ($EnableGlobalView) { '          <option value="">Gesamt</option>' } else { '' }
     $dropdownTypeOptions = (@('', 'VBS', 'BAT', 'CMD', 'PS1', 'PSM1', 'KIX') | ForEach-Object {
         $label = if ($_ -eq '') { 'Gesamt' } else { $_ }
         $val = [System.Net.WebUtility]::HtmlEncode($_)
@@ -735,7 +742,7 @@ function Export-ScriptFlowchartToHtml {
       <div class="flex items-center gap-2">
         <label for="filter-topfolder" class="text-sm font-medium text-gray-700">Filter: Top-Ordner</label>
         <select id="filter-topfolder" class="rounded border border-gray-300 px-3 py-1.5 text-gray-900 focus:ring-2 focus:ring-blue-500">
-          <option value="">Gesamt</option>
+$gesamtOptionLine
 $dropdownTopOptions
         </select>
       </div>
@@ -1023,7 +1030,7 @@ $outDir = [System.IO.Path]::GetDirectoryName($outResolved)
 if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
-Export-ScriptFlowchartToHtml -Graph $graph -OutputFilePath $outResolved -RootPath $rootPath
+Export-ScriptFlowchartToHtml -Graph $graph -OutputFilePath $outResolved -RootPath $rootPath -EnableGlobalView:$EnableGlobalView
 $state.Phases.HtmlExported = $true
 Write-Checkpoint -State $state -CheckpointPath $script:CheckpointPath
 
