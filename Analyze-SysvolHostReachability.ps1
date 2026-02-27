@@ -617,7 +617,9 @@ if (-not (Test-Path -LiteralPath $ScriptsPath -PathType Container)) {
     Write-Error "Pfad existiert nicht oder ist kein Verzeichnis: $ScriptsPath"
 }
 $rootResolved = Resolve-Path -Path $ScriptsPath -ErrorAction Stop
-$rootPath = $rootResolved.Path
+# Provider-Qualifier (z.B. 'Microsoft.PowerShell.Core\FileSystem::') entfernen,
+# damit $rootPath zum Format von $f.FullName passt.
+$rootPath = $rootResolved.ProviderPath
 
 function ConvertTo-OrderedHashtable {
     param([object]$Obj)

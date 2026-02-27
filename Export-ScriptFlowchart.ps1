@@ -890,7 +890,9 @@ $filterScript
 
 # Main
 $rootResolved = Resolve-Path -Path $ScriptsPath -ErrorAction Stop
-$rootPath = $rootResolved.Path
+# Provider-Qualifier (z.B. 'Microsoft.PowerShell.Core\FileSystem::') entfernen,
+# damit $rootPath zum Format von $v.FullName / $c.FullName passt.
+$rootPath = $rootResolved.ProviderPath
 
 $state = New-VbsFlowState -ScriptsPathValue $rootPath
 $checkpoint = Read-Checkpoint -CheckpointPath $script:CheckpointPath
