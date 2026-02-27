@@ -335,6 +335,106 @@ function Get-CallersOfVbs {
     return $edges
 }
 
+function Get-RecursiveInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject[]]$Nodes,
+        [Parameter(Mandatory = $true)]
+        [pscustomobject[]]$Edges
+    )
+    $nodePaths = @($Nodes | ForEach-Object { $_.FullPath } | Where-Object { $_ })
+    if ($nodePaths.Count -eq 0 -or $Edges.Count -eq 0) {
+        return [pscustomobject]@{
+            RecursiveNodes = @{}
+            RecursiveEdges = @{}
+        }
+    }
+    $indexByNode = @{}
+    $lowlink = @{}
+    $onStack = @{}
+    $stack = New-Object System.Collections.Stack
+    $adj = @{}
+    foreach ($e in $Edges) {
+        if (-not $e.SourcePath -or -not $e.TargetPath) { continue }
+        if (-not $adj.ContainsKey($e.SourcePath)) {
+            $adj[$e.SourcePath] = New-Object System.Collections.Generic.List[string]
+        }
+        $adj[$e.SourcePath].Add([string]$e.TargetPath)
+    }
+    $components = New-Object System.Collections.Generic.List[object]
+    $index = 0
+    $strongConnect = {
+        param([string]$v)
+        $indexByNode[$v] = $index
+        $lowlink[$v] = $index
+        $index++
+        $stack.Push($v)
+        $onStack[$v] = $true
+        $neighbors = $null
+        if ($adj.ContainsKey($v)) {
+            $neighbors = $adj[$v]
+        }
+        if ($neighbors) {
+            foreach ($w in $neighbors) {
+                if (-not $indexByNode.ContainsKey($w)) {
+                    & $strongConnect $w
+                    $lowlink[$v] = [Math]::Min($lowlink[$v], $lowlink[$w])
+                }
+                elseif ($onStack[$w]) {
+                    $lowlink[$v] = [Math]::Min($lowlink[$v], $indexByNode[$w])
+                }
+            }
+        }
+        if ($lowlink[$v] -eq $indexByNode[$v]) {
+            $component = @()
+            while ($true) {
+                $w = $stack.Pop()
+                $onStack[$w] = $false
+                $component += $w
+                if ($w -eq $v) { break }
+            }
+            if ($component.Count -gt 0) {
+                [void]$components.Add($component)
+            }
+        }
+    }
+    foreach ($v in $nodePaths) {
+        if (-not $indexByNode.ContainsKey($v)) {
+            & $strongConnect $v
+        }
+    }
+    $recursiveNodes = @{}
+    foreach ($comp in $components) {
+        if ($comp.Count -gt 1) {
+            foreach ($p in $comp) {
+                $recursiveNodes[$p] = $true
+            }
+        }
+        elseif ($comp.Count -eq 1) {
+            $p = $comp[0]
+            foreach ($e in $Edges) {
+                if ($e.SourcePath -and $e.TargetPath -and $e.SourcePath -eq $p -and $e.TargetPath -eq $p) {
+                    $recursiveNodes[$p] = $true
+                    break
+                }
+            }
+        }
+    }
+    $recursiveEdges = @{}
+    foreach ($e in $Edges) {
+        if (-not $e.SourcePath -or -not $e.TargetPath) { continue }
+        if ($recursiveNodes.ContainsKey($e.SourcePath) -and $recursiveNodes.ContainsKey($e.TargetPath)) {
+            $key = "$($e.SourcePath)->$($e.TargetPath)"
+            $recursiveEdges[$key] = $true
+        }
+    }
+    return [pscustomobject]@{
+        RecursiveNodes = $recursiveNodes
+        RecursiveEdges = $recursiveEdges
+    }
+}
+
 function Build-FlowGraph {
     [CmdletBinding()]
     param(
@@ -553,6 +653,24 @@ function Build-FlowGraph {
         $targetUnderRoot = $e.TargetPath -and $e.TargetPath.StartsWith($rootTrimmed, [StringComparison]::OrdinalIgnoreCase)
         $e.IsCrossBoundary = (-not $targetUnderRoot) -or ($srcTop -ne $tgtTop)
     }
+    $recInfo = Get-RecursiveInfo -Nodes $nodeList -Edges $edges
+    $recursiveNodes = $recInfo.RecursiveNodes
+    $recursiveEdges = $recInfo.RecursiveEdges
+    foreach ($n in $nodeList) {
+        $isRec = $false
+        if ($n.FullPath -and $recursiveNodes.ContainsKey($n.FullPath)) {
+            $isRec = $true
+        }
+        $n | Add-Member -NotePropertyName 'IsRecursive' -NotePropertyValue $isRec -Force
+    }
+    foreach ($e in $edges) {
+        $key = "$($e.SourcePath)->$($e.TargetPath)"
+        $isRec = $false
+        if ($e.SourcePath -and $e.TargetPath -and $recursiveEdges.ContainsKey($key)) {
+            $isRec = $true
+        }
+        $e | Add-Member -NotePropertyName 'IsRecursive' -NotePropertyValue $isRec -Force
+    }
     # Pro Knoten: Liste der im Code vorkommenden Aufruf-Snippets (für Hervorhebung)
     foreach ($n in $nodeList) {
         $calls = @($edges | Where-Object { $_.SourcePath -eq $n.FullPath } | ForEach-Object { $_.RawCall } | Where-Object { $_ })
@@ -704,13 +822,15 @@ function Export-ScriptFlowchartToHtml {
             relativePath = $relative
             folderDepth  = $folderDepth
             isExternal   = $isExternal
+            isRecursive  = [bool]$node.IsRecursive
         }
     })
     $reportEdges = @($Graph.Edges | ForEach-Object {
         [ordered]@{
-            sourcePath     = $_.SourcePath
-            targetPath     = $_.TargetPath
+            sourcePath      = $_.SourcePath
+            targetPath      = $_.TargetPath
             isCrossBoundary = [bool]$_.IsCrossBoundary
+            isRecursive     = [bool]$_.IsRecursive
         }
     })
     $reportData = @{ nodes = $reportNodes; edges = $reportEdges } | ConvertTo-Json -Depth 3 -Compress
@@ -845,6 +965,9 @@ $filterScript = @"
         if (!n) return;
         var typeLabel = n.type || '';
         var lbl = typeLabel ? n.displayName + ' (' + typeLabel + ')' : n.displayName;
+        if (n.isRecursive) {
+          lbl += ' [REC]';
+        }
         lines.push('    ' + n.id + '["' + escapeMermaidLabel(lbl) + '"]');
       });
       lines.push('  end');
@@ -858,6 +981,9 @@ $filterScript = @"
         if (!n) return;
         var typeLabel = n.type || '';
         var lbl = typeLabel ? n.displayName + ' (' + typeLabel + ')' : n.displayName;
+        if (n.isRecursive) {
+          lbl += ' [REC]';
+        }
         lines.push('    ' + n.id + '["' + escapeMermaidLabel(lbl) + '"]');
       });
       lines.push('  end');
@@ -933,7 +1059,7 @@ $filterScript = @"
   <div class="max-w-7xl mx-auto px-4 py-8">
     <header class="mb-8">
       <h1 class="text-3xl font-bold text-gray-900">VBS Flowchart</h1>
-      <p class="mt-2 text-gray-600">Aufrufbeziehungen: Pfeil = „ruft auf“ (von Aufrufer zu aufgerufener Datei).</p>
+      <p class="mt-2 text-gray-600">Aufrufbeziehungen: Pfeil = „ruft auf“ (von Aufrufer zu aufgerufener Datei). Knoten mit [REC] im Namen gehören zu rekursiven Aufrufzyklen.</p>
       <div class="mt-2 flex flex-wrap gap-2">
         <span class="px-2 py-1 rounded bg-blue-100 text-blue-800 text-sm">VBS</span>
         <span class="px-2 py-1 rounded bg-amber-100 text-amber-800 text-sm">BAT/CMD</span>
@@ -948,7 +1074,7 @@ $flowchartContainerHtml
     </section>
 
     <h2 class="text-2xl font-bold text-gray-900 mt-12 mb-4">Quellcode (alle Skripte)</h2>
-    <p class="text-gray-600 mb-4">Alle aufrufenden und aufgerufenen Dateien (VBS, BAT, CMD, PS1, KiXtart). Gelb: Aufruf im gleichen Top-Ordner. Rot: Verweis in anderen Top-Ordner oder nach außen. Rote Pfeile im Diagramm = gleiche Bedeutung.</p>
+    <p class="text-gray-600 mb-4">Alle aufrufenden und aufgerufenen Dateien (VBS, BAT, CMD, PS1, KiXtart). Knoten mit [REC] im Namen gehören zu rekursiven Aufrufzyklen. Gelb: Aufruf im gleichen Top-Ordner. Rot: Verweis in anderen Top-Ordner oder nach außen. Rote Pfeile im Diagramm = gleiche Bedeutung.</p>
 $($codeSections.ToString())
   <script type="application/json" id='reportData'>$reportDataEscaped</script>
   </div>
