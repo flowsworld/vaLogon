@@ -96,6 +96,17 @@ Der Fokus liegt auf **Security**, **Abhängigkeiten**, **Nutzung**, **Duplikaten
   - Erzeugt eine HTML-Datei mit **Zusammenfassung**, **Erreichbarkeit pro Host** (farbige Indikatoren) und ggf. **Subnet-Scan** (pingbare IPs pro Subnetz).
   - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\HostReachabilityReport.html`), `-Encoding` (Fallback), `-ThrottleLimit` (Parallelität, Default: 8), `-SubnetScan` (Subnetz-Scan aktivieren, Default: an), `-SubnetPrefixLength` (CIDR, Default: 24).
 
+- `Export-CopilotAnalysisReport.ps1`  
+  Erzeugt einen **Markdown-Report** zur Auswertung mit **Microsoft 365 Copilot** (Word, Teams):
+  - Pro Skript: relativer Pfad, Typ, Kategorie, Nutzung/Kritikalität, Abhängigkeiten, GPO-Migrationsempfehlung.
+  - Mit `-AnalysisResultsPath` (Pfad zu AnalysisResults): Nutzung, Sicherheitsrisiken und Dependency-Graph aus `analysis_results.json`; ohne: nur Inventar und Kategorien aus Dateiinhalt.
+  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\CopilotScriptAnalysis.md`), `-AnalysisResultsPath` (optional).
+
+- `Export-GpoMigrationScripts.ps1`  
+  Erzeugt **PowerShell-Skripte** zur GPO-Migration (zum manuellen Prüfen und Ausführen):
+  - Pro Top-Ordner eine `.ps1`-Datei mit `New-GPO`, `New-GPLink` und Kommentaren für GPO Preferences (Laufwerkszuordnung, Drucker, Umgebung). Keine automatische GPO-Erstellung.
+  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\GpoMigrationScripts`), `-AnalysisResultsPath` (optional), `-GpoNamePrefix` (Default: `Migration_`).
+
 Die Analyseergebnisse werden standardmäßig **unterhalb von** `.\AnalysisResults` abgelegt (anpassbar über `-OutputPath`).
 
 Struktur des Output‑Ordners:
@@ -179,6 +190,28 @@ pwsh.exe -File .\Analyze-SysvolHostReachability.ps1 `
 Optional: `-OutputPath 'D:\Reports\HostReachabilityReport.html'`, `-Encoding`, `-ThrottleLimit` (z. B. 4), `-SubnetScan` (Subnetz-Scan, Standard: an), `-SubnetPrefixLength` (z. B. 24 für /24).
 
 Das Skript durchsucht alle Skript- und Textdateien nach Servernamen und IPs (UNC, `http(s)://`, IPv4), entfernt Duplikate und lokale Platzhalter (localhost, 127.0.0.1), und prüft jeden Host: DNS, Ping, TCP-Ports 80/443/445/135/3389/5985 (parallel), WinRM. Wenn **Subnet-Scan** aktiv ist, wird pro Host das zugehörige Subnetz (z. B. /24) ermittelt und nach erreichbaren (pingbaren) IP-Adressen durchsucht. Der HTML-Report enthält eine Zusammenfassung, eine Tabelle mit grünen/roten Badges pro Host (DNS, Ping, Ports, WinRM) und bei aktiviertem Subnet-Scan eine weitere Tabelle „Subnet-Scan (pingbare Endpunkte)“ mit Quell-Host, Subnetz, Anzahl erreichbarer IPs und Liste der IPs.
+
+#### Report für Microsoft 365 Copilot
+
+```powershell
+pwsh.exe -File .\Export-CopilotAnalysisReport.ps1 `
+    -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
+```
+
+Optional: `-OutputPath '.\CopilotScriptAnalysis.md'`, `-AnalysisResultsPath '.\AnalysisResults'` (wenn die Hauptanalyse bereits gelaufen ist).
+
+Erzeugt eine **Markdown-Datei** mit allen Skripten inkl. Kategorie, Nutzung/Kritikalität, Abhängigkeiten und GPO-Migrationsempfehlung. Die Datei kann in **Word** oder **Teams** geöffnet und mit **Microsoft 365 Copilot** ausgewertet werden (z. B. „Analysiere diese Skripte auf Kritikalität“ oder „Welche GPO-Einstellungen ersetzen diese Logon-Skripte?“). Keine KI-APIs im Tool – die Analyse durch Copilot erfolgt manuell durch den Nutzer. Mit `-AnalysisResultsPath` werden Nutzung, Sicherheitsrisiken und Dependency-Graph aus `json/analysis_results.json` übernommen; ohne diesen Parameter nur Inventar und Kategorien.
+
+#### GPO-Migrations-Skripte
+
+```powershell
+pwsh.exe -File .\Export-GpoMigrationScripts.ps1 `
+    -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
+```
+
+Optional: `-OutputPath '.\GpoMigrationScripts'`, `-AnalysisResultsPath '.\AnalysisResults'`, `-GpoNamePrefix 'Migration_'`.
+
+Erzeugt **pro Top-Ordner** eine PowerShell-Datei (`Create-GPO-<Top>.ps1`), die `New-GPO` und `New-GPLink` verwendet sowie Kommentare für GPO Preferences (Laufwerkszuordnung, Drucker, Umgebung) enthält. **Keine automatische GPO-Erstellung** – der Admin prüft die Skripte, ersetzt Platzhalter (z. B. Ziel-OU, Servernamen) und führt sie nach Prüfung aus (z. B. mit `-WhatIf`). Voraussetzung: GroupPolicy-Modul (RSAT), Rechte zum Erstellen/Verknüpfen von GPOs.
 
 ---
 
