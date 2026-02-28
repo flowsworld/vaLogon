@@ -1,0 +1,1 @@
+Dummy-Textdatei für Tests (nicht parsbar durch Script-Flowchart).
