@@ -18,6 +18,10 @@ TestSYSVOL/
 
 Die beiden GPO-Ordner **2217** und **2236** enthalten bewusst **unterschiedliche** Testdateien (andere Server, andere Aufrufketten, teils andere Dateien), damit Duplikat-, Kategorisierungs- und Flow-Analysen echte Varianz sehen.
 
+In **allen** Unterordnern (Logon, Common, DeptA, DeptB) liegen zusätzlich **Dummy-Dateien**, die vom Script-Flowchart **nicht** als Skripte geparst werden: `.txt`, `.ini`, `.xml`, `.log`, `.bak`, `.py`, `.exe`, `.dll` (leere Platzhalter). So kann getestet werden, dass nur VBS/BAT/CMD/PS1/PSM1/KIX in den Aufrufgraphen einfließen.
+
+Im **Stammordner** `scripts/` und in den **Top-Ordnern** `2217/` und `2236/` liegen weitere Dummies: sowohl **relevante** Typen (PS1, BAT, VBS, KIX) mit **Verlinkungen** in darunter liegende Skripte (z. B. `bootstrap.ps1` → `2217\Logon\run_login.ps1`, `2217\startup.ps1` → `.\Logon\user_logon.bat`), als auch **irrelevante** (z. B. `readme.txt`, `config.ini`, `data.xml`, `install.log`, `placeholder.exe`/`.dll`). So lassen sich Aufrufketten über Ordner-Ebenen und die Filterung nach Dateityp prüfen.
+
 | Bereich   | 2217 (Büro) | 2236 (Schlank) |
 |-----------|--------------|-----------------|
 | Logon     | map_drives, set_printers, helper.vbs, prnport.vbs; user_logon ruft login.vbs + run_login.ps1 + helper.vbs | Nur map_drives, set_printers; user_logon nur login.vbs; optional.vbs (verwaist) |

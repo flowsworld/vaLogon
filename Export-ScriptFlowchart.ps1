@@ -341,8 +341,10 @@ function Get-RecursiveInfo {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [pscustomobject[]]$Nodes,
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [pscustomobject[]]$Edges
     )
     $nodePaths = @($Nodes | ForEach-Object { $_.FullPath } | Where-Object { $_ })
@@ -691,7 +693,6 @@ function Get-MermaidFlowchart {
     )
     $sb = [System.Text.StringBuilder]::new()
     [void]$sb.AppendLine("flowchart LR")
-    [void]$sb.AppendLine("  direction TB")
     $idByPath = @{}
     foreach ($n in $Graph.Nodes) {
         $idByPath[$n.FullPath] = $n.Id
@@ -701,6 +702,11 @@ function Get-MermaidFlowchart {
         $nodeLabel = if ($typeLabel) { "$($n.DisplayName) ($typeLabel)" } else { $n.DisplayName }
         $nodeLabel = $nodeLabel -replace '"', '\"' -replace '\[', '\[' -replace '\]', '\]'
         [void]$sb.AppendLine("  $($n.Id)[`"$nodeLabel`"]")
+    }
+    $typeStyle = @{ VBS = 'fill:#dbeafe,stroke:#1e40af'; BAT = 'fill:#fef3c7,stroke:#92400e'; CMD = 'fill:#fef3c7,stroke:#92400e'; PS1 = 'fill:#dcfce7,stroke:#166534'; PSM1 = 'fill:#dcfce7,stroke:#166534'; KIX = 'fill:#f3e8ff,stroke:#6b21a8' }
+    foreach ($n in $Graph.Nodes) {
+        $s = $typeStyle[$n.Type]
+        if ($s) { [void]$sb.AppendLine("  style $($n.Id) $s") }
     }
     $edgeIndex = 0
     foreach ($e in $Graph.Edges) {
@@ -733,6 +739,8 @@ function Get-NodeTopFolder {
     if ($rel.StartsWith($rootTrimmed, [StringComparison]::OrdinalIgnoreCase)) {
         $rel = $rel.Substring($rootTrimmed.Length).TrimStart('\', '/')
     }
+    # Dateien direkt unter Root (ein Segment, kein Unterordner) → (Root)
+    if ([string]::IsNullOrWhiteSpace($rel) -or $rel -notmatch '[\\/]') { return '(Root)' }
     $seg = ($rel -split '[\\/]')[0]
     if ([string]::IsNullOrWhiteSpace($seg)) { return '(Root)' }
     return $seg
@@ -798,6 +806,8 @@ function Export-ScriptFlowchartToHtml {
         $isExternal = $false
         $relative = $full
         $folderDepth = 0
+        $parentFolder = ''
+        $folderLabel  = '(Root)'
         if ($full) {
             if ($full.StartsWith($rootTrimmed, [StringComparison]::OrdinalIgnoreCase)) {
                 $relative = $full.Substring($rootTrimmed.Length).TrimStart('\', '/')
@@ -805,9 +815,13 @@ function Export-ScriptFlowchartToHtml {
                 if ($segments.Length -gt 1) {
                     # Verzeichnis-Tiefe relativ zu RootPath (Anzahl Verzeichnisse)
                     $folderDepth = $segments.Length - 1
+                    $parentFolder = $segments[0..($segments.Length - 2)] -join '/'
+                    $folderLabel = $segments[$segments.Length - 2]
                 }
                 else {
                     $folderDepth = 0
+                    $parentFolder = ''
+                    $folderLabel = 'scripts'
                 }
             }
             else {
@@ -823,6 +837,8 @@ function Export-ScriptFlowchartToHtml {
             topFolder    = $top
             relativePath = $relative
             folderDepth  = $folderDepth
+            parentFolder = $parentFolder
+            folderLabel  = $folderLabel
             isExternal   = $isExternal
             isRecursive  = [bool]$node.IsRecursive
         }
@@ -849,7 +865,7 @@ function Export-ScriptFlowchartToHtml {
     </div>
 "@
 
-    $dropdownTopOptions = ($topFoldersList | ForEach-Object {
+    $dropdownTopOptions = ($topFoldersList | Where-Object { $_ -ne '(Root)' } | ForEach-Object {
         $enc = [System.Net.WebUtility]::HtmlEncode($_)
         "        <option value=`"$enc`">$enc</option>"
     }) -join "`n"
@@ -928,6 +944,11 @@ $filterScript = @"
     if (!filteredNodes || filteredNodes.length === 0) {
       return '';
     }
+    // Root-Ansicht entbehrlich: Knoten mit Top-Ordner (Root) aus Diagramm ausblenden
+    filteredNodes = filteredNodes.filter(function(n) { return n.topFolder !== '(Root)'; });
+    if (filteredNodes.length === 0) {
+      return '';
+    }
     var pathSet = {};
     var idByPath = {};
     var nodeById = {};
@@ -936,41 +957,75 @@ $filterScript = @"
       idByPath[n.fullPath] = n.id;
       nodeById[n.id] = n;
     });
-    var lines = ['flowchart LR', '  direction TB'];
+    filteredEdges = (filteredEdges || []).filter(function(e) {
+      return pathSet[e.sourcePath] && pathSet[e.targetPath];
+    });
+    var lines = ['flowchart LR'];
 
-    // Knoten nach Ordner-Ebene (folderDepth) und externen Zielen gruppieren
-    var depthMap = {};   // depth -> [nodeId]
+    // Knoten nach Ordner (parentFolder) und externen Zielen gruppieren – ein Subgraph pro Ordner
+    var folderMap = {};   // parentFolder -> [nodeId]
     var externalIds = [];
     filteredNodes.forEach(function(n) {
       if (n.isExternal) {
         externalIds.push(n.id);
         return;
       }
-      var d = typeof n.folderDepth === 'number' ? n.folderDepth : 0;
-      if (!depthMap[d]) depthMap[d] = [];
-      depthMap[d].push(n.id);
+      var key = (n.parentFolder != null && n.parentFolder !== undefined) ? String(n.parentFolder) : '';
+      if (!folderMap[key]) folderMap[key] = [];
+      folderMap[key].push(n.id);
     });
 
-    // Subgraphs nach Ebene
-    var depthKeys = Object.keys(depthMap).map(function(k) { return parseInt(k, 10); }).sort(function(a, b) { return a - b; });
-    depthKeys.forEach(function(d) {
-      var sgId = 'level' + d;
-      var label;
-      if (d === 0 && (!topVal || topVal === '')) {
-        label = 'Root';
-      } else {
-        label = 'Ebene ' + d;
-      }
-      lines.push('  subgraph ' + sgId + ' ["' + escapeMermaidLabel(label) + '"]');
-      depthMap[d].forEach(function(nodeId) {
-        var n = nodeById[nodeId];
-        if (!n) return;
-        var typeLabel = n.type || '';
-        var lbl = typeLabel ? n.displayName + ' (' + typeLabel + ')' : n.displayName;
-        if (n.isRecursive) {
-          lbl += ' [REC]';
+    function folderDepth(path) {
+      if (!path || path === '') return 0;
+      return (path.match(/[/\\]/g) || []).length + 1;
+    }
+    var folderKeys = Object.keys(folderMap).sort(function(a, b) {
+      var da = folderDepth(a), db = folderDepth(b);
+      if (da !== db) return da - db;
+      return (a || '').localeCompare(b || '');
+    });
+
+    // Nach Tiefe gruppieren: jede Tiefe = eine Spalte (links nach rechts), Ordner gleicher Ebene untereinander
+    var byDepth = {};
+    folderKeys.forEach(function(parentFolder) {
+      var d = folderDepth(parentFolder);
+      if (!byDepth[d]) byDepth[d] = [];
+      byDepth[d].push(parentFolder);
+    });
+    var depthOrder = Object.keys(byDepth).map(Number).sort(function(a, b) { return a - b; });
+
+    // Pro Ordner einen Anker (erster Knoten); Reihenfolge = Tiefe, dann Pfad
+    var anchorsByDepth = {};
+    depthOrder.forEach(function(d) { anchorsByDepth[d] = []; });
+
+    depthOrder.forEach(function(d) {
+      var folderList = byDepth[d];
+      lines.push('  subgraph col_d' + d + ' [" "]');
+      folderList.forEach(function(parentFolder) {
+        var sgId = (parentFolder === '') ? 'root' : ('folder_' + parentFolder.replace(/[/\\]/g, '_').replace(/[^A-Za-z0-9_]/g, '_'));
+        var label = 'scripts';
+        var nodeIds = folderMap[parentFolder];
+        if (nodeIds.length && nodeById[nodeIds[0]] && nodeById[nodeIds[0]].folderLabel != null) {
+          label = nodeById[nodeIds[0]].folderLabel;
+        } else if (parentFolder !== '') {
+          var parts = parentFolder.split(/[/\\]/);
+          label = parts[parts.length - 1] || parentFolder;
         }
-        lines.push('    ' + n.id + '["' + escapeMermaidLabel(lbl) + '"]');
+        if (nodeIds.length > 0) {
+          anchorsByDepth[d].push(nodeIds[0]);
+        }
+        lines.push('    subgraph ' + sgId + ' ["' + escapeMermaidLabel(label) + '"]');
+        nodeIds.forEach(function(nodeId) {
+          var n = nodeById[nodeId];
+          if (!n) return;
+          var typeLabel = n.type || '';
+          var lbl = typeLabel ? n.displayName + ' (' + typeLabel + ')' : n.displayName;
+          if (n.isRecursive) {
+            lbl += ' [REC]';
+          }
+          lines.push('      ' + n.id + '["' + escapeMermaidLabel(lbl) + '"]');
+        });
+        lines.push('    end');
       });
       lines.push('  end');
     });
@@ -990,6 +1045,35 @@ $filterScript = @"
       });
       lines.push('  end');
     }
+
+    // Knotenfaerbung gemaess Legende: VBS=blau, BAT/CMD=amber, PS1/PSM1=gruen, KIX=lila
+    var typeStyle = { VBS: 'fill:#dbeafe,stroke:#1e40af', BAT: 'fill:#fef3c7,stroke:#92400e', CMD: 'fill:#fef3c7,stroke:#92400e', PS1: 'fill:#dcfce7,stroke:#166534', PSM1: 'fill:#dcfce7,stroke:#166534', KIX: 'fill:#f3e8ff,stroke:#6b21a8' };
+    filteredNodes.forEach(function(n) {
+      var s = typeStyle[n.type];
+      if (s) {
+        lines.push('  style ' + n.id + ' ' + s);
+      }
+    });
+
+    // Layout-Kanten: VERPFLICHTEND links nach rechts pro Ebene
+    // - Gleiche Ebene: ~~~ (gleicher Rank) zwischen Ankern derselben Tiefe -> Ordner untereinander
+    // - Naechste Ebene: --> von letztem Anker der Tiefe zum ersten der naechsten -> naechste Spalte rechts
+    var layoutEdgeCount = 0;
+    for (var di = 0; di < depthOrder.length; di++) {
+      var anchors = anchorsByDepth[depthOrder[di]] || [];
+      for (var ai = 0; ai < anchors.length - 1; ai++) {
+        lines.push('  ' + anchors[ai] + ' ~~~ ' + anchors[ai + 1]);
+        layoutEdgeCount++;
+      }
+      if (di < depthOrder.length - 1) {
+        var nextAnchors = anchorsByDepth[depthOrder[di + 1]] || [];
+        if (anchors.length > 0 && nextAnchors.length > 0) {
+          lines.push('  ' + anchors[anchors.length - 1] + ' --> ' + nextAnchors[0]);
+          layoutEdgeCount++;
+        }
+      }
+    }
+
     var edgeIndex = 0;
     var crossBoundaryIndices = [];
     filteredEdges.forEach(function(e) {
@@ -997,13 +1081,16 @@ $filterScript = @"
       var tid = idByPath[e.targetPath];
       if (sid && tid) {
         lines.push('  ' + sid + ' --> ' + tid);
-        if (e.isCrossBoundary) crossBoundaryIndices.push(edgeIndex);
+        if (e.isCrossBoundary) crossBoundaryIndices.push(layoutEdgeCount + edgeIndex);
         edgeIndex++;
       }
     });
     filteredNodes.forEach(function(n) {
       lines.push('  click ' + n.id + ' href "#code-' + n.id.replace(/[^A-Za-z0-9_-]/g, '_') + '"');
     });
+    for (var li = 0; li < layoutEdgeCount; li++) {
+      lines.push('  linkStyle ' + li + ' stroke:none,stroke-width:0');
+    }
     crossBoundaryIndices.forEach(function(idx) {
       lines.push('  linkStyle ' + idx + ' stroke:red,stroke-width:2px');
     });
@@ -1053,14 +1140,14 @@ $filterScript = @"
 <html lang="de">
 <head>
   <meta charset="utf-8">
-  <title>VBS Flowchart – Aufrufbeziehungen</title>
+  <title>Skript-Flowchart – Aufrufbeziehungen</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 </head>
 <body class="bg-gray-50 text-gray-900 min-h-screen">
   <div class="max-w-7xl mx-auto px-4 py-8">
     <header class="mb-8">
-      <h1 class="text-3xl font-bold text-gray-900">VBS Flowchart</h1>
+      <h1 class="text-3xl font-bold text-gray-900">Skript-Flowchart</h1>
       <p class="mt-2 text-gray-600">Aufrufbeziehungen: Pfeil = „ruft auf“ (von Aufrufer zu aufgerufener Datei). Knoten mit [REC] im Namen gehören zu rekursiven Aufrufzyklen.</p>
       <div class="mt-2 flex flex-wrap gap-2">
         <span class="px-2 py-1 rounded bg-blue-100 text-blue-800 text-sm">VBS</span>

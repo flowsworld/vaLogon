@@ -78,7 +78,7 @@ Der Fokus liegt auf **Security**, **Abhängigkeiten**, **Nutzung**, **Duplikaten
 - `Export-ScriptFlowchart.ps1`  
   Eigenständiges Skript für einen **Skript-Flowchart** (VBS, BAT, CMD, PS1, PSM1, KIX) als HTML:
   - Findet alle Skriptdateien unter `ScriptsPath` und löst Aufrufbeziehungen auf (wer ruft wen auf).
-  - Erzeugt eine einzelne HTML-Datei mit **Mermaid**-Flowchart und **Tailwind**-Layout; pro Skript wird der Quellcode in `<pre><code>` ausgegeben; Verweise über Top-Ordner-Grenzen werden gelb/rot hervorgehoben; rekursive Aufrufzyklen werden erkannt und betroffene Knoten im Diagramm mit `[REC]` gekennzeichnet.
+  - Erzeugt eine einzelne HTML-Datei (**Skript-Flowchart**) mit **Mermaid**-Flowchart und **Tailwind**-Layout: Darstellung **ein Subgraph pro Ordner**, Ebenen strikt **von links nach rechts**; Knoten werden **nach Dateityp gefärbt** (VBS=blau, BAT/CMD=amber, PS1/PSM1=grün, KiXtart=lila, wie in der Legende). Pro Skript wird der Quellcode in `<pre><code>` ausgegeben; Verweise über Top-Ordner-Grenzen werden gelb/rot hervorgehoben; rekursive Aufrufzyklen werden erkannt und betroffene Knoten mit `[REC]` gekennzeichnet. Die Root-Ansicht (Dateien direkt unter `ScriptsPath`) ist entbehrlich und erscheint weder im Filter noch im Diagramm.
   - Für große Umgebungen wird der Graph **pro Top-Ordner** (erstes Verzeichnis-Segment unterhalb von `ScriptsPath`) mit eigenen Checkpoint-Dateien aufgebaut; die Teilgraphen werden anschließend zu einer gemeinsamen HTML-Gesamtansicht aggregiert.
   - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\ScriptFlowchart.html`), `-EnableGlobalView` (optional, siehe unten), `-Encoding` (Fallback für Skriptdateien).
 
@@ -153,10 +153,10 @@ pwsh.exe -File .\Export-ScriptFlowchart.ps1 `
 
 Optional: `-OutputPath 'D:\Reports\ScriptFlow.html'`, `-Encoding` (Fallback-Encoding für Skriptdateien), `-EnableGlobalView` (Gesamt-Ansicht über alle Top-Ordner aktivieren).
 
-Das Skript erkennt Aufrufe zwischen **VBS**, **BAT/CMD**, **PowerShell** (PS1/PSM1) und **KiXtart** (KIX). Die HTML-Datei enthält ein Mermaid-Flowchart (Pfeil = „ruft auf“), Filter nach Top-Ordner und Dateityp, sowie pro Skript den Quellcode mit hervorgehobenen Verlinkungen (gelb = gleicher Top-Ordner, rot = über Grenzen).  
-Knoten, die Teil eines rekursiven Aufrufzyklus sind, werden im Diagramm zusätzlich mit `[REC]` im Knotennamen markiert.  
-Standardmäßig werden im Flowchart nur gefilterte Sichten pro Top-Ordner / Dateityp dargestellt; mit `-EnableGlobalView` kann zusätzlich eine **Gesamt-Ansicht** (alle Top-Ordner gemeinsam) eingeblendet werden – dies kann bei sehr großen Umgebungen deutlich mehr Ressourcen verbrauchen.  
-Checkpoint/Resume: pro Top-Ordner wird eine eigene Checkpoint-Datei nach Schema `script_flowchart_checkpoint_<Top>.json` im Arbeitsverzeichnis angelegt; bei einem erneuten Lauf werden diese Dateien für Resume genutzt und nach erfolgreichem vollständigen Lauf wieder entfernt.
+Das Skript erkennt Aufrufe zwischen **VBS**, **BAT/CMD**, **PowerShell** (PS1/PSM1) und **KiXtart** (KIX). Die HTML-Datei (Überschrift: **Skript-Flowchart**) enthält ein Mermaid-Flowchart (Pfeil = „ruft auf“) mit **einem Kästchen pro Ordner**, Ebenen von links nach rechts; Knoten sind **nach Dateityp gefärbt** (wie in der Legende: VBS blau, BAT/CMD amber, PS1/PSM1 grün, KiXtart lila). Filter nach Top-Ordner und Dateityp; pro Skript der Quellcode mit hervorgehobenen Verlinkungen (gelb = gleicher Top-Ordner, rot = über Grenzen).  
+Knoten, die Teil eines rekursiven Aufrufzyklus sind, werden mit `[REC]` markiert.  
+Mit `-EnableGlobalView` kann eine **Gesamt-Ansicht** (alle Top-Ordner) eingeblendet werden – bei sehr großen Umgebungen höherer Ressourcenbedarf.  
+Checkpoint/Resume: pro Top-Ordner eine eigene Datei `script_flowchart_checkpoint_<Top>.json` im Arbeitsverzeichnis; nach vollständigem Lauf entfernt.
 
 #### Login-Skript Kategorien (statistische Analyse)
 
