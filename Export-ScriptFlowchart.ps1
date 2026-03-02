@@ -162,7 +162,7 @@ function Test-ContentReferencesVbs {
 function Test-ContentReferencesScript {
     param([string]$Content)
     if (-not $Content) { return $false }
-    $scriptRefPattern = '(?i)(\.(?:vbs|bat|cmd|ps1|psm1|kix)\b|WScript\.Shell\.Run|Execute\s*\(|ExecuteGlobal\s*\(|CALL\s+|RUN\s+|SHELL\s+|&\s*["'']|Start-Process\s+)'
+    $scriptRefPattern = '(?i)(\.(?:vbs|bat|cmd|ps1|psm1|kix)\b|WScript\.Shell\.Run|Execute\s*\(|ExecuteGlobal\s*\(|CALL\s+|RUN\s+|SHELL\s+|&\s*["'']|Start-Process\s+|\b(?:wscript|cscript)(?:\.exe)?\b|\bkix32(?:\.exe)?\b)'
     return $Content -match $scriptRefPattern
 }
 
@@ -252,8 +252,8 @@ function Get-VbsCallsFromContent {
         '(?i)\bExecute(?:Global)?\s+["''](.+?\.vbs)["'']'
     )
     foreach ($rx in $vbsRegexes) {
-        $matches = [regex]::Matches($content, $rx)
-        foreach ($m in $matches) {
+        $literalMatches = [regex]::Matches($content, $rx)
+        foreach ($m in $literalMatches) {
             $rawTarget = $m.Groups[1].Value
             if (-not $rawTarget) { continue }
             $resolved = Resolve-TargetPath -RawTarget $rawTarget -SourceDirectory $SourceDirectory
@@ -266,6 +266,44 @@ function Get-VbsCallsFromContent {
             }
         }
     }
+
+    # Heuristik: dynamische Zielzuweisungen (Variable -> Skriptdatei) mit anschließendem Run/Execute
+    # Beispiel: LogonDatei = "Contec.vbs" ... WshShell.Run(LogonDatei)
+    $varToScript = @{}
+    $assignRegex = [regex]'(?im)^\s*(\w+)\s*=\s*["'']([^"'']+\.(?:vbs|bat|cmd|ps1|psm1|kix))["'']'
+    $assignMatches = $assignRegex.Matches($Content)
+    foreach ($m in $assignMatches) {
+        $varName = $m.Groups[1].Value
+        $scriptLiteral = $m.Groups[2].Value
+        if ($varName -and $scriptLiteral) {
+            $varToScript[$varName] = $scriptLiteral
+        }
+    }
+    if ($varToScript.Count -gt 0) {
+        $runRegexes = @(
+            [regex]'(?im)\bRun\s*\(\s*(\w+)\s*\)',
+            [regex]'(?im)\bExecute(?:Global)?\s*\(\s*(\w+)\s*\)'
+        )
+        foreach ($rr in $runRegexes) {
+            $runMatches = $rr.Matches($Content)
+            foreach ($rm in $runMatches) {
+                $varName = $rm.Groups[1].Value
+                if (-not $varName) { continue }
+                if (-not $varToScript.ContainsKey($varName)) { continue }
+                $rawTarget = $varToScript[$varName]
+                if (-not $rawTarget) { continue }
+                $resolved = Resolve-TargetPath -RawTarget $rawTarget -SourceDirectory $SourceDirectory
+                if ($resolved -and [System.IO.Path]::GetExtension($resolved) -in $script:AllScriptExtensions) {
+                    $edges += [pscustomobject]@{
+                        SourcePath = $SourcePath
+                        TargetPath = $resolved
+                        RawCall    = $rm.Value
+                    }
+                }
+            }
+        }
+    }
+
     return $edges
 }
 
@@ -288,10 +326,23 @@ function Get-CallersOfVbs {
         $lines = $Content -split "`n"
         foreach ($l in $lines) {
             $t = $l.Trim()
+            if (-not $t) { continue }
+            # Kommentare überspringen (REM/:: am Zeilenanfang)
+            if ($t -match '^(?i)\s*(rem\b|::)') { continue }
+
+            $payload = $t
             if ($t -match '^(?i)\s*(call|start|cmd\s+/c)\s+(.+)$') {
-                $cmd = $matches[2].Trim()
-                $targetToken = ($cmd -split '\s+')[0]
-                $rawTarget = $targetToken.Trim('"', "'")
+                $payload = $matches[2].Trim()
+            }
+
+            if (-not $payload) { continue }
+
+            # 1) WScript/CScript mit Skriptargument (z. B. wscript %0..\Contec.vbs)
+            $wscriptPattern = '(?i)\b(?:wscript|cscript)(?:\.exe)?\b[^\r\n]*?["'']?([^"''\s]+?\.(?:vbs|bat|cmd|ps1|psm1|kix))["'']?'
+            $wMatches = [regex]::Matches($payload, $wscriptPattern)
+            foreach ($wm in $wMatches) {
+                $rawTarget = $wm.Groups[1].Value
+                if (-not $rawTarget) { continue }
                 $resolved = Resolve-TargetPath -RawTarget $rawTarget -SourceDirectory $dir
                 if ($resolved -and [System.IO.Path]::GetExtension($resolved) -in $script:AllScriptExtensions) {
                     $edges += [pscustomobject]@{
@@ -300,6 +351,41 @@ function Get-CallersOfVbs {
                         RawCall    = $t
                     }
                 }
+            }
+            if ($wMatches.Count -gt 0) { continue }
+
+            # 2) KiXtart: kix32.exe <skript> (z. B. kix32.exe logon.txt)
+            $tokens = $payload -split '\s+'
+            if ($tokens.Count -gt 0) {
+                $first = $tokens[0].Trim('"', "'")
+                if ($first -match '^(?i)kix32(\.exe)?$' -and $tokens.Count -ge 2) {
+                    $rawTarget = $tokens[1].Trim('"', "'")
+                    if ($rawTarget) {
+                        $resolved = Resolve-TargetPath -RawTarget $rawTarget -SourceDirectory $dir
+                        if ($resolved) {
+                            $edges += [pscustomobject]@{
+                                SourcePath = $SourcePath
+                                TargetPath = $resolved
+                                RawCall    = $t
+                            }
+                        }
+                    }
+                    continue
+                }
+            }
+
+            # 3) Direkter Skriptaufruf ohne call/start (z. B. contec.vbs)
+            if ($payload -match '^(?i)\s*([^\s]+?\.(?:vbs|bat|cmd|ps1|psm1|kix))(?:\s+.*)?$') {
+                $rawTarget = $matches[1].Trim('"', "'")
+                $resolved = Resolve-TargetPath -RawTarget $rawTarget -SourceDirectory $dir
+                if ($resolved -and [System.IO.Path]::GetExtension($resolved) -in $script:AllScriptExtensions) {
+                    $edges += [pscustomobject]@{
+                        SourcePath = $SourcePath
+                        TargetPath = $resolved
+                        RawCall    = $t
+                    }
+                }
+                continue
             }
         }
     }
@@ -524,6 +610,9 @@ function Build-FlowGraph {
                 '.ps1' { 'PS1' }
                 '.psm1' { 'PSM1' }
                 '.kix' { 'KIX' }
+                '.txt' {
+                    if ($FullPath -match '(?i)(logon|_kix)\.txt$') { 'KIX' } else { '' }
+                }
                 default { '' }
             }
         }
