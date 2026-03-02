@@ -83,6 +83,15 @@ Der Fokus liegt auf **Security**, **Abhängigkeiten**, **Nutzung**, **Duplikaten
   - Für große Umgebungen wird der Graph **pro Top-Ordner** (erstes Verzeichnis-Segment unterhalb von `ScriptsPath`) mit eigenen Checkpoint-Dateien aufgebaut; die Teilgraphen werden anschließend zu einer gemeinsamen HTML-Gesamtansicht aggregiert.
   - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\ScriptFlowchart.html`), `-EnableGlobalView` (optional, siehe unten), `-ExcludeFolders` (optionale Liste relativer Ordnerpfade, die inklusive ihrer Unterordner von der Analyse ausgeschlossen werden, z. B. `2217`, `2217/Legacy`, `2236/Test`), `-Encoding` (Fallback für Skriptdateien).
 
+- `Export-ScriptFlowchart-All.ps1`  
+  Erweiterter Flowchart-Export für **alle Dateitypen** (nicht nur Skripte):
+  - Erstellt Knoten für alle Dateien unter `ScriptsPath` (inkl. z. B. `.exe`, `.dll`, `.lnk`, `.ini`, `.xml`, `.json`, `.txt`).
+  - Erkennt Dateiverknüpfungen über Dateinamen in textbasierten Dateien und zeichnet Kanten (inkl. cross-boundary/extern).
+  - Exportiert pro Top-Ordner eine eigene JSON-Datei (`ScriptFlowchart-All-<Top>.json`) und erzeugt eine HTML-Template-Datei (`ScriptFlowchart-All.html`), die die Daten dynamisch lädt.
+  - Funktioniert auch im `file://`-Modus: Für lokale Öffnung sind die Top-Ordner-Daten zusätzlich im HTML eingebettet.
+  - UI-Funktionen: Top-Ordner-Auswahl, Zoom (100–1000 %), Ausblenden externer/roter Verknüpfungen, dynamischer Codebereich unter dem Flowchart mit markierten Verknüpfungspunkten (gelb intern, rot extern).
+  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\ScriptFlowchart-All.html`), `-ExcludeFolders`, `-Encoding`.
+
 - `Analyze-LoginScriptCategories.ps1`  
   Eigenständiges Skript zur **statistischen Kategorie-Analyse** von Anmeldeskripten:
   - Analysiert rekursiv alle Skriptdateien (`.ps1`, `.psm1`, `.bat`, `.cmd`, `.vbs`, `.kix`) unter `ScriptsPath` und ordnet sie anhand von Inhaltsmustern Kategorien zu (Laufwerks-Mappings, Drucker, Inventarisierung/Asset, Sicherheit/Compliance, Software-Verteilung, Umgebungsvariablen/Pfade bzw. Unbekannt).
@@ -169,6 +178,21 @@ Das Skript erkennt Aufrufe zwischen **VBS**, **BAT/CMD**, **PowerShell** (PS1/PS
 Knoten, die Teil eines rekursiven Aufrufzyklus sind, werden mit `[REC]` markiert.  
 Mit `-EnableGlobalView` kann eine **Gesamt-Ansicht** (alle Top-Ordner) eingeblendet werden – bei sehr großen Umgebungen höherer Ressourcenbedarf.  
 Checkpoint/Resume: pro Top-Ordner eine eigene Datei `script_flowchart_checkpoint_<Top>.json` im Arbeitsverzeichnis; nach vollständigem Lauf entfernt.
+
+#### Flowchart für alle Dateitypen (Template + Top-Ordner-JSONs)
+
+```powershell
+pwsh.exe -File .\Export-ScriptFlowchart-All.ps1 `
+    -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
+```
+
+Optional: `-OutputPath 'D:\Reports\ScriptFlowchart-All.html'`, `-ExcludeFolders @('2217','2236/Test')`, `-Encoding`.
+
+Ausgabe:
+- `ScriptFlowchart-All.html` als Viewer/Template
+- `ScriptFlowchart-All-<Top>.json` pro Top-Ordner (z. B. `...-2117.json`)
+
+Die HTML bietet Top-Ordner-Auswahl, Zoom, optionales Ausblenden externer/roter Verknüpfungen sowie einen dynamischen Bereich „Dateien und Inhalt“ unterhalb des Diagramms mit farblicher Markierung der Verknüpfungspunkte.
 
 #### Login-Skript Kategorien (statistische Analyse)
 
