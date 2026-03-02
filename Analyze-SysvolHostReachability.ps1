@@ -231,6 +231,7 @@ function Get-AllUniqueHosts {
         $topFolder = ($relPath -split '[\\/]')[0]
         if ([string]::IsNullOrWhiteSpace($topFolder)) { $topFolder = '(Root)' }
         $content = Get-FileContentSafe -Path $f.FullName
+        if ($null -eq $content -or $content -eq '') { continue }
         $found = Get-UniqueHostsFromContent -Content $content
         foreach ($h in $found) {
             $h = $h.Trim()
