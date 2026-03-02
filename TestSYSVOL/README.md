@@ -7,20 +7,24 @@ Dieses Verzeichnis simuliert eine typische SYSVOL\scripts-Struktur mit **Dummy-D
 ```
 TestSYSVOL/
   scripts/
+    2117/        – GPO „Legacy“ (ältere KIX/VBS/BAT-Varianten, historische Konfiguration)
     2217/        – GPO „Büro“ (vollständige Logon-Kette, mehrere Shares/Drucker, prnport.vbs, banner.ps1)
     2236/        – GPO „Schlank“ (weniger Laufwerke/Drucker, andere Server, optional.vbs)
-    <GPO-ID>/
+    <GPO-ID>/    – Muster für weitere GPO-IDs
       Logon/     – zentrale Logon-Skripte (VBS, BAT, CMD, PS1, KIX)
       DeptA/     – Abteilung A (Init, Inventar)
       DeptB/     – Abteilung B (Start-VBS → Logon)
       Common/    – Konfiguration, Umgebung, Software-Verteilung, Sicherheit
 ```
 
-Die beiden GPO-Ordner **2217** und **2236** enthalten bewusst **unterschiedliche** Testdateien (andere Server, andere Aufrufketten, teils andere Dateien), damit Duplikat-, Kategorisierungs- und Flow-Analysen echte Varianz sehen.
+Die GPO-Ordner **2117**, **2217** und **2236** enthalten bewusst **unterschiedliche** Testdateien (andere Server, andere Aufrufketten, teils andere Dateien), damit Duplikat-, Kategorisierungs- und Flow-Analysen echte Varianz sehen.
 
 In **allen** Unterordnern (Logon, Common, DeptA, DeptB) liegen zusätzlich **Dummy-Dateien**, die vom Script-Flowchart **nicht** als Skripte geparst werden: `.txt`, `.ini`, `.xml`, `.log`, `.bak`, `.py`, `.exe`, `.dll` (leere Platzhalter). So kann getestet werden, dass nur VBS/BAT/CMD/PS1/PSM1/KIX in den Aufrufgraphen einfließen.
 
 Im **Stammordner** `scripts/` und in den **Top-Ordnern** `2217/` und `2236/` liegen weitere Dummies: sowohl **relevante** Typen (PS1, BAT, VBS, KIX) mit **Verlinkungen** in darunter liegende Skripte (z. B. `bootstrap.ps1` → `2217\Logon\run_login.ps1`, `2217\startup.ps1` → `.\Logon\user_logon.bat`), als auch **irrelevante** (z. B. `readme.txt`, `config.ini`, `data.xml`, `install.log`, `placeholder.exe`/`.dll`). So lassen sich Aufrufketten über Ordner-Ebenen und die Filterung nach Dateityp prüfen.
+Im **Stammordner** `scripts/` und in den **Top-Ordnern** `2117/`, `2217/` und `2236/` liegen weitere Dummies: sowohl **relevante** Typen (PS1, BAT, VBS, KIX) mit **Verlinkungen** in darunter liegende Skripte (z. B. `entry.vbs`, `launcher.bat`, `startup.ps1` → Logon-Skripte in `.\Logon`), als auch **irrelevante** (z. B. `readme.txt`, `config.ini`, `data.xml`, `install.log`, `placeholder.exe`/`.dll`). So lassen sich Aufrufketten über Ordner-Ebenen und die Filterung nach Dateityp prüfen.
+
+Im Wurzelordner `TestSYSVOL/` liegen zusätzlich Hilfsdateien wie eine Excel-Datei (`EbenenVisual.xlsx`) und ein Beispiel-Screenshot, die die Ebenen- und GPO-Struktur visuell dokumentieren.
 
 | Bereich   | 2217 (Büro) | 2236 (Schlank) |
 |-----------|--------------|-----------------|

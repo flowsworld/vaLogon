@@ -51,7 +51,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:MaxFileBytes = 1MB
 $script:VbsExtensions = @('.vbs')
-$script:CallerExtensions = @('.bat', '.cmd', '.ps1', '.psm1', '.kix')
+$script:CallerExtensions = @('.bat', '.cmd', '.ps1', '.psm1', '.kix', '.txt')
 $script:AllScriptExtensions = @('.vbs', '.bat', '.cmd', '.ps1', '.psm1', '.kix')
 $script:ExcludePrefixes = @()
 
@@ -216,6 +216,13 @@ function Resolve-TargetPath {
     )
     if (-not $RawTarget) { return $null }
     $raw = $RawTarget.Trim().Trim('"', "'")
+    # Batch-typische Platzhalter wie %~dp0 (Verzeichnis des aktuellen Skripts) bestmöglich auflösen
+    if ($SourceDirectory -and $raw -match '^(?i)%~dp0(.+)$') {
+        $suffix = $matches[1]
+        if ($suffix) {
+            $raw = Join-Path -Path $SourceDirectory -ChildPath $suffix
+        }
+    }
     if ($raw -like '\\*' -or $raw -match '^[A-Za-z]:\\') {
         if (Test-Path -LiteralPath $raw -ErrorAction SilentlyContinue) {
             return (Resolve-Path -LiteralPath $raw -ErrorAction SilentlyContinue).Path
@@ -281,8 +288,14 @@ function Get-VbsCallsFromContent {
     }
     if ($varToScript.Count -gt 0) {
         $runRegexes = @(
+            # Run(LogonDatei)
             [regex]'(?im)\bRun\s*\(\s*(\w+)\s*\)',
-            [regex]'(?im)\bExecute(?:Global)?\s*\(\s*(\w+)\s*\)'
+            # Run LogonDatei
+            [regex]'(?im)\bRun\s+(\w+)\b',
+            # Execute(LogonDatei) / ExecuteGlobal(LogonDatei)
+            [regex]'(?im)\bExecute(?:Global)?\s*\(\s*(\w+)\s*\)',
+            # Execute LogonDatei / ExecuteGlobal LogonDatei
+            [regex]'(?im)\bExecute(?:Global)?\s+(\w+)\b'
         )
         foreach ($rr in $runRegexes) {
             $runMatches = $rr.Matches($Content)
@@ -416,7 +429,7 @@ function Get-CallersOfVbs {
             }
         }
     }
-    elseif ($Extension -eq '.kix') {
+    elseif ($Extension -in '.kix', '.txt') {
         $lines = $Content -split "`n"
         foreach ($l in $lines) {
             $t = $l.Trim()
@@ -1282,17 +1295,16 @@ $filterScript = @"
   function applyFilter() {
     var topVal = selectTop ? selectTop.value : '';
     var typeVal = selectType ? selectType.value : '';
-    var filteredNodes = nodes.filter(function(n) {
-      var topOk = topVal === '' || n.topFolder === topVal;
-      var typeOk = typeVal === '' || n.type === typeVal;
-      return topOk && typeOk;
+    // 1) Knoten für das Diagramm nur nach Top-Ordner filtern (Typ-Filter wirkt NUR auf Code-Ansicht)
+    var graphNodes = nodes.filter(function(n) {
+      return topVal === '' || n.topFolder === topVal;
     });
     var pathSet = {};
-    filteredNodes.forEach(function(n) { pathSet[n.fullPath] = true; });
-    var filteredEdges = edges.filter(function(e) {
+    graphNodes.forEach(function(n) { pathSet[n.fullPath] = true; });
+    var graphEdges = edges.filter(function(e) {
       return pathSet[e.sourcePath] && pathSet[e.targetPath];
     });
-    var code = buildMermaidCode(filteredNodes, filteredEdges, topVal);
+    var code = buildMermaidCode(graphNodes, graphEdges, topVal);
     renderMermaid(code);
     sections.forEach(function(sec) {
       var tf = sec.getAttribute('data-topfolder') || '';

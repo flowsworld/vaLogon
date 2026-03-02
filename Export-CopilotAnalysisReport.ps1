@@ -241,8 +241,8 @@ $byCat = $rows | Group-Object -Property Category | Sort-Object -Property Count -
 foreach ($g in $byCat) {
     [void]$sb.AppendLine("- **$($g.Name)**: $($g.Count) Datei(en)")
 }
-$activeCount = ($rows | Where-Object { $_.Usage -eq 'Aktiv verwendet' }).Count
-$orphanCount = ($rows | Where-Object { $_.Usage -eq 'Verwaist' }).Count
+$activeCount = ($rows | Where-Object { $_.Usage -eq 'Aktiv verwendet' } | Measure-Object).Count
+$orphanCount = ($rows | Where-Object { $_.Usage -eq 'Verwaist' } | Measure-Object).Count
 [void]$sb.AppendLine("")
 [void]$sb.AppendLine("- GPO/AD-referenziert (aktiv): $activeCount")
 [void]$sb.AppendLine("- Verwaist: $orphanCount")

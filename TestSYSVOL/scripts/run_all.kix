@@ -1,3 +1,0 @@
-; Dummy: Stammordner – KIX ruft 2217/2236 Logon auf
-CALL 2217\Logon\logon.kix
-RUN 2236\Logon\user_logon.bat
