@@ -1,0 +1,10 @@
+DIM $Filsize, $Filvers, $Filtime
+
+if exist ("c:\programme\Adobe\Acrobat 5.0\Distillr\acrodist.exe")
+   $Filsize = getfilesize("c:\programme\Adobe\Acrobat 5.0\Distillr\acrodist.exe")
+   $Filvers = getfileversion("c:\programme\Adobe\Acrobat 5.0\Distillr\acrodist.exe")
+   $Filtime = getfiletime("c:\programme\Adobe\Acrobat 5.0\Distillr\acrodist.exe")
+   Open (1, "\\VAEWEB01\HELPDESK\DISTILLER.txt", 5)
+   writeline(1, "@DATE | @TIME | %username% | %computername% | $Filsize | $Filvers | $Filtime" + chr(13) + chr(10))
+   Close(1)
+endif

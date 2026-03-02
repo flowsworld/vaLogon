@@ -1,0 +1,9 @@
+DIM $Filsize, $Filvers, $Filtime
+
+   $Filsize = getfilesize("c:\programme\sappc\sapgui\sapgui.exe")
+   $Filvers = getfileversion("c:\programme\sappc\sapgui\sapgui.exe")
+   $Filtime = getfiletime("c:\programme\sappc\sapgui\sapgui.exe")
+
+Open (1, "\\VAEWEB01\HELPDESK\SAPGUI.txt", 5)
+writeline(1, "@DATE | @TIME | %username% | %computername% | $Filsize | $Filvers | $Filtime" + chr(13) + chr(10))
+Close(1)

@@ -1,0 +1,8 @@
+use U: "\\VAEGFSDECONT01\%username%"
+use X: "\\VAEGFSDECONT01\Contec_User"
+use V: "\\2217DBATDHCP\install"
+use G: "\\VAEGFSDECONT01\CAD1"
+use J: "\\VAEGFSDECONT01\CAD2"
+use F: "\\VAEGFSDECONT01\Pubdata"
+use T: "\\VAEGFSDECONT01\shares"
+use G: "\\2217TSDECONT01\Pubdata1"
