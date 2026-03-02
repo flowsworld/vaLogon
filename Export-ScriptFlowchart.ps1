@@ -14,6 +14,14 @@
 .PARAMETER OutputPath
     Pfad der zu erzeugenden HTML-Datei (Default: .\ScriptFlowchart.html).
 
+.PARAMETER EnableGlobalView
+    Optional: Blendet eine zusätzliche Gesamt-Ansicht (alle Top-Ordner) im Diagramm ein.
+
+.PARAMETER ExcludeFolders
+    Liste relativer Ordnerpfade unterhalb von ScriptsPath, die inklusive ihrer Unterordner bei der Analyse
+    ignoriert werden sollen (z. B. 2217, 2217/Legacy, 2236/Test). Aufrufe in diese Ordner werden im Flowchart
+    als externe Ziele zusammengefasst dargestellt.
+
 .PARAMETER Encoding
     Fallback-Encoding beim Lesen von Skriptdateien (Default: UTF8).
 
@@ -33,6 +41,8 @@ param(
 
     [switch]$EnableGlobalView,
 
+    [string[]]$ExcludeFolders,
+
     [System.Text.Encoding]$Encoding = [System.Text.Encoding]::UTF8
 )
 
@@ -43,6 +53,7 @@ $script:MaxFileBytes = 1MB
 $script:VbsExtensions = @('.vbs')
 $script:CallerExtensions = @('.bat', '.cmd', '.ps1', '.psm1', '.kix')
 $script:AllScriptExtensions = @('.vbs', '.bat', '.cmd', '.ps1', '.psm1', '.kix')
+$script:ExcludePrefixes = @()
 
 function Read-Checkpoint {
     [CmdletBinding()]
@@ -172,6 +183,9 @@ function Get-AllRelevantFiles {
     $vbsFiles = @()
     $callerCandidates = @()
     foreach ($f in $files) {
+        if (Test-IsExcludedPath -FullPath $f.FullName -RootPath $RootPath) {
+            continue
+        }
         $ext = $f.Extension.ToLowerInvariant()
         if ($ext -eq '.vbs') {
             $vbsFiles += $f
@@ -584,14 +598,31 @@ function Build-FlowGraph {
             $dir = $v.DirectoryName
             $outEdges = Get-VbsCallsFromContent -Content $content -SourcePath $v.FullName -SourceDirectory $dir
             foreach ($e in $outEdges) {
-                $key = "$($e.SourcePath)->$($e.TargetPath)"
+                $effectiveTarget = $e.TargetPath
+                $excludedPrefix = Get-ExcludedPrefixForPath -FullPath $e.TargetPath -RootPath $RootPath
+                if ($excludedPrefix) {
+                    $effectiveTarget = "EXTERNAL::$excludedPrefix"
+                }
+                $key = "$($e.SourcePath)->$effectiveTarget"
                 if ($seenEdges[$key]) { continue }
                 $seenEdges[$key] = $true
-                $targetNode = & $ensureNode $nodes $e.TargetPath $null $null
-                if ($targetNode -and -not $targetNode.Content -and [System.IO.Path]::GetExtension($e.TargetPath) -in $script:AllScriptExtensions) {
-                    $targetNode.Content = Get-FileContentSafe -Path $e.TargetPath
+                if ($excludedPrefix) {
+                    $targetNode = & $ensureNode $nodes $effectiveTarget '' $null
+                    $targetNode.DisplayName = "Extern: $excludedPrefix"
+                    $targetNode.Type = ''
                 }
-                $e2 = [pscustomobject]@{ SourcePath = $e.SourcePath; TargetPath = $e.TargetPath; RawCall = $e.RawCall; IsCrossBoundary = $false }
+                else {
+                    $targetNode = & $ensureNode $nodes $e.TargetPath $null $null
+                    if ($targetNode -and -not $targetNode.Content -and [System.IO.Path]::GetExtension($e.TargetPath) -in $script:AllScriptExtensions) {
+                        $targetNode.Content = Get-FileContentSafe -Path $e.TargetPath
+                    }
+                }
+                $e2 = [pscustomobject]@{
+                    SourcePath      = $e.SourcePath
+                    TargetPath      = $effectiveTarget
+                    RawCall        = $e.RawCall
+                    IsCrossBoundary = $false
+                }
                 $edges += $e2
             }
             [void]$processedVbs.Add($v.FullName)
@@ -619,11 +650,28 @@ function Build-FlowGraph {
             $dir = $c.DirectoryName
             $outEdges = Get-CallersOfVbs -Content $content -SourcePath $c.FullName -SourceDirectory $dir -Extension $c.Extension.ToLowerInvariant()
             foreach ($e in $outEdges) {
-                $key = "$($e.SourcePath)->$($e.TargetPath)"
+                $effectiveTarget = $e.TargetPath
+                $excludedPrefix = Get-ExcludedPrefixForPath -FullPath $e.TargetPath -RootPath $RootPath
+                if ($excludedPrefix) {
+                    $effectiveTarget = "EXTERNAL::$excludedPrefix"
+                }
+                $key = "$($e.SourcePath)->$effectiveTarget"
                 if ($seenEdges[$key]) { continue }
                 $seenEdges[$key] = $true
-                $null = & $ensureNode $nodes $e.TargetPath $null $null
-                $e2 = [pscustomobject]@{ SourcePath = $e.SourcePath; TargetPath = $e.TargetPath; RawCall = $e.RawCall; IsCrossBoundary = $false }
+                if ($excludedPrefix) {
+                    $targetNode = & $ensureNode $nodes $effectiveTarget '' $null
+                    $targetNode.DisplayName = "Extern: $excludedPrefix"
+                    $targetNode.Type = ''
+                }
+                else {
+                    $null = & $ensureNode $nodes $e.TargetPath $null $null
+                }
+                $e2 = [pscustomobject]@{
+                    SourcePath      = $e.SourcePath
+                    TargetPath      = $effectiveTarget
+                    RawCall        = $e.RawCall
+                    IsCrossBoundary = $false
+                }
                 $edges += $e2
             }
             [void]$processedCallers.Add($c.FullName)
@@ -744,6 +792,38 @@ function Get-NodeTopFolder {
     $seg = ($rel -split '[\\/]')[0]
     if ([string]::IsNullOrWhiteSpace($seg)) { return '(Root)' }
     return $seg
+}
+
+function Get-ExcludedPrefixForPath {
+    param(
+        [string]$FullPath,
+        [string]$RootPath
+    )
+    if (-not $FullPath) { return $null }
+    $prefixes = $script:ExcludePrefixes
+    if (-not $prefixes -or $prefixes.Count -eq 0) { return $null }
+    $rootTrimmed = $RootPath.TrimEnd('\', '/')
+    $rel = $FullPath
+    if ($rel.StartsWith($rootTrimmed, [StringComparison]::OrdinalIgnoreCase)) {
+        $rel = $rel.Substring($rootTrimmed.Length).TrimStart('\', '/')
+    }
+    $relNorm = $rel -replace '\\', '/'
+    foreach ($p in $prefixes) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        if ($relNorm.Equals($p, [StringComparison]::OrdinalIgnoreCase) -or
+            $relNorm.StartsWith($p + '/', [StringComparison]::OrdinalIgnoreCase)) {
+            return $p
+        }
+    }
+    return $null
+}
+
+function Test-IsExcludedPath {
+    param(
+        [string]$FullPath,
+        [string]$RootPath
+    )
+    return [bool](Get-ExcludedPrefixForPath -FullPath $FullPath -RootPath $RootPath)
 }
 
 function Get-CodeWithHighlightedLinks {
@@ -1038,6 +1118,9 @@ $filterScript = @"
         if (!n) return;
         var typeLabel = n.type || '';
         var lbl = typeLabel ? n.displayName + ' (' + typeLabel + ')' : n.displayName;
+        if (n.isExternal) {
+          lbl += ' (extern)';
+        }
         if (n.isRecursive) {
           lbl += ' [REC]';
         }
@@ -1190,6 +1273,31 @@ $rootResolved = Resolve-Path -Path $ScriptsPath -ErrorAction Stop
 # Provider-Qualifier (z.B. 'Microsoft.PowerShell.Core\FileSystem::') entfernen,
 # damit $rootPath zum Format von $v.FullName / $c.FullName passt.
 $rootPath = $rootResolved.ProviderPath
+
+if ($ExcludeFolders) {
+    $normalizedExcludePrefixes = @(
+        $ExcludeFolders |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object {
+                $p = $_.Trim()
+                $p = $p -replace '\\', '/'
+                $p = $p.Trim('/')
+                $p
+            } |
+            Where-Object { $_ } |
+            Sort-Object -Unique
+    )
+    $script:ExcludePrefixes = $normalizedExcludePrefixes
+    if ($normalizedExcludePrefixes.Count -gt 0) {
+        foreach ($prefix in $normalizedExcludePrefixes) {
+            $folderPath = Join-Path -Path $rootPath -ChildPath ($prefix -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+            if (-not (Test-Path -LiteralPath $folderPath -PathType Container)) {
+                Write-Warning "Ausschlussordner '$prefix' wurde unterhalb von '$rootPath' nicht gefunden."
+            }
+        }
+        Write-Host ("Ausschlussordner (inkl. Unterordner) werden ignoriert: {0}" -f ($normalizedExcludePrefixes -join ', ')) -ForegroundColor Yellow
+    }
+}
 
 Write-Host "Scanne $rootPath ..." -ForegroundColor Cyan
 $vbsFiles, $callerFiles = Get-AllRelevantFiles -RootPath $rootPath

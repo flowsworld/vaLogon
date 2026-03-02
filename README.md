@@ -80,7 +80,7 @@ Der Fokus liegt auf **Security**, **Abhängigkeiten**, **Nutzung**, **Duplikaten
   - Findet alle Skriptdateien unter `ScriptsPath` und löst Aufrufbeziehungen auf (wer ruft wen auf).
   - Erzeugt eine einzelne HTML-Datei (**Skript-Flowchart**) mit **Mermaid**-Flowchart und **Tailwind**-Layout: Darstellung **ein Subgraph pro Ordner**, Ebenen strikt **von links nach rechts**; Knoten werden **nach Dateityp gefärbt** (VBS=blau, BAT/CMD=amber, PS1/PSM1=grün, KiXtart=lila, wie in der Legende). Pro Skript wird der Quellcode in `<pre><code>` ausgegeben; Verweise über Top-Ordner-Grenzen werden gelb/rot hervorgehoben; rekursive Aufrufzyklen werden erkannt und betroffene Knoten mit `[REC]` gekennzeichnet. Die Root-Ansicht (Dateien direkt unter `ScriptsPath`) ist entbehrlich und erscheint weder im Filter noch im Diagramm.
   - Für große Umgebungen wird der Graph **pro Top-Ordner** (erstes Verzeichnis-Segment unterhalb von `ScriptsPath`) mit eigenen Checkpoint-Dateien aufgebaut; die Teilgraphen werden anschließend zu einer gemeinsamen HTML-Gesamtansicht aggregiert.
-  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\ScriptFlowchart.html`), `-EnableGlobalView` (optional, siehe unten), `-Encoding` (Fallback für Skriptdateien).
+  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\ScriptFlowchart.html`), `-EnableGlobalView` (optional, siehe unten), `-ExcludeFolders` (optionale Liste relativer Ordnerpfade, die inklusive ihrer Unterordner von der Analyse ausgeschlossen werden, z. B. `2217`, `2217/Legacy`, `2236/Test`), `-Encoding` (Fallback für Skriptdateien).
 
 - `Analyze-LoginScriptCategories.ps1`  
   Eigenständiges Skript zur **statistischen Kategorie-Analyse** von Anmeldeskripten:
@@ -162,9 +162,9 @@ pwsh.exe -File .\Export-ScriptFlowchart.ps1 `
     -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
 ```
 
-Optional: `-OutputPath 'D:\Reports\ScriptFlow.html'`, `-Encoding` (Fallback-Encoding für Skriptdateien), `-EnableGlobalView` (Gesamt-Ansicht über alle Top-Ordner aktivieren).
+Optional: `-OutputPath 'D:\Reports\ScriptFlow.html'`, `-Encoding` (Fallback-Encoding für Skriptdateien), `-EnableGlobalView` (Gesamt-Ansicht über alle Top-Ordner aktivieren), `-ExcludeFolders @('2217','2236/Test')` (ein oder mehrere relative Ordnerpfade unterhalb von `ScriptsPath`, die inklusive ihrer Unterordner von der Analyse ausgeschlossen werden).
 
-Das Skript erkennt Aufrufe zwischen **VBS**, **BAT/CMD**, **PowerShell** (PS1/PSM1) und **KiXtart** (KIX). Die HTML-Datei (Überschrift: **Skript-Flowchart**) enthält ein Mermaid-Flowchart (Pfeil = „ruft auf“) mit **einem Kästchen pro Ordner**, Ebenen von links nach rechts; Knoten sind **nach Dateityp gefärbt** (wie in der Legende: VBS blau, BAT/CMD amber, PS1/PSM1 grün, KiXtart lila). Filter nach Top-Ordner und Dateityp; pro Skript der Quellcode mit hervorgehobenen Verlinkungen (gelb = gleicher Top-Ordner, rot = über Grenzen).  
+Das Skript erkennt Aufrufe zwischen **VBS**, **BAT/CMD**, **PowerShell** (PS1/PSM1) und **KiXtart** (KIX). Die HTML-Datei (Überschrift: **Skript-Flowchart**) enthält ein Mermaid-Flowchart (Pfeil = „ruft auf“) mit **einem Kästchen pro Ordner**, Ebenen von links nach rechts; Knoten sind **nach Dateityp gefärbt** (wie in der Legende: VBS blau, BAT/CMD amber, PS1/PSM1 grün, KiXtart lila). Filter nach Top-Ordner und Dateityp; pro Skript der Quellcode mit hervorgehobenen Verlinkungen (gelb = gleicher Top-Ordner, rot = über Grenzen). Per `-ExcludeFolders` können ein oder mehrere Ordner (inklusive ihrer Unterordner) von der Analyse ausgeschlossen werden; Aufrufe in diese Ordner werden im Diagramm in einem separaten Bereich **„Extern (…)"** zusammengefasst dargestellt.  
 Knoten, die Teil eines rekursiven Aufrufzyklus sind, werden mit `[REC]` markiert.  
 Mit `-EnableGlobalView` kann eine **Gesamt-Ansicht** (alle Top-Ordner) eingeblendet werden – bei sehr großen Umgebungen höherer Ressourcenbedarf.  
 Checkpoint/Resume: pro Top-Ordner eine eigene Datei `script_flowchart_checkpoint_<Top>.json` im Arbeitsverzeichnis; nach vollständigem Lauf entfernt.
