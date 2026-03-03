@@ -118,6 +118,94 @@ function Get-SanitizedContentForJson {
     return $sanitized
 }
 
+function Get-CommentInfoForLine {
+    [CmdletBinding()]
+    param(
+        [string]$Line,
+        [string]$Extension,
+        [bool]$InPsBlockComment
+    )
+    $result = [ordered]@{
+        IsCommentLine    = $false
+        CommentStart     = -1
+        InPsBlockComment = $InPsBlockComment
+    }
+    if ($null -eq $Line) { return [pscustomobject]$result }
+
+    $ext = if ($null -ne $Extension) { [string]$Extension } else { '' }
+    $ext = $ext.ToLowerInvariant()
+    $trimmed = $Line.TrimStart()
+    $leadingWs = $Line.Length - $trimmed.Length
+
+    if ($ext -in @('.ps1', '.psm1')) {
+        if ($result.InPsBlockComment) {
+            $result.IsCommentLine = $true
+            $result.CommentStart = 0
+            $psBlockEnd = '#' + '>'
+            $endIdx = $Line.IndexOf($psBlockEnd)
+            if ($endIdx -ge 0) {
+                $result.InPsBlockComment = $false
+            }
+            return [pscustomobject]$result
+        }
+        $psBlockStart = '<' + '#'
+        $psBlockEnd = '#' + '>'
+        $startBlockIdx = $Line.IndexOf($psBlockStart)
+        if ($startBlockIdx -ge 0) {
+            $endIdxSame = $Line.IndexOf($psBlockEnd, $startBlockIdx + 2)
+            $result.CommentStart = $startBlockIdx
+            $result.IsCommentLine = $true
+            if ($endIdxSame -lt 0) {
+                $result.InPsBlockComment = $true
+            }
+            return [pscustomobject]$result
+        }
+        $hashIdx = $Line.IndexOf('#')
+        if ($hashIdx -ge 0) {
+            $result.IsCommentLine = $true
+            $result.CommentStart = $hashIdx
+            return [pscustomobject]$result
+        }
+        return [pscustomobject]$result
+    }
+
+    switch ($ext) {
+        { $_ -in @('.bat', '.cmd') } {
+            if ($trimmed -match '^(?i)(rem\b|::)') {
+                $result.IsCommentLine = $true
+                $result.CommentStart = $leadingWs
+            }
+        }
+        '.vbs' {
+            if ($trimmed -match "^(?i)rem\b") {
+                $result.IsCommentLine = $true
+                $result.CommentStart = $leadingWs
+            }
+            else {
+                $apos = $Line.IndexOf("'")
+                if ($apos -ge 0) {
+                    $result.IsCommentLine = $true
+                    $result.CommentStart = $apos
+                }
+            }
+        }
+        '.kix' {
+            if ($trimmed.StartsWith(';')) {
+                $result.IsCommentLine = $true
+                $result.CommentStart = $leadingWs
+            }
+        }
+        { $_ -in @('.ini', '.cfg', '.config', '.url') } {
+            if ($trimmed.StartsWith(';') -or $trimmed.StartsWith('#')) {
+                $result.IsCommentLine = $true
+                $result.CommentStart = $leadingWs
+            }
+        }
+    }
+
+    return [pscustomobject]$result
+}
+
 function Get-NormalizedExcludeFolders {
     param(
         [string[]]$Folders
@@ -279,6 +367,8 @@ function Get-LinksFromContent {
         [Parameter(Mandatory = $true)]
         [string]$SourcePath,
         [Parameter(Mandatory = $true)]
+        [string]$Extension,
+        [Parameter(Mandatory = $true)]
         [hashtable]$NameIndex,
         [hashtable]$ExternalNodesByLabel,
         [hashtable]$NodesByPath,
@@ -296,12 +386,41 @@ function Get-LinksFromContent {
     $allMatches = [regex]::Matches($Content, $pattern)
     if ($allMatches.Count -eq 0) { return $edges }
 
-    $seen = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+    $labelFlags = @{}
+    $lineMatches = [regex]::Matches($Content, '(?m)^.*(?:\r?\n|$)')
+    $inPsBlockComment = $false
 
-    foreach ($m in $allMatches) {
-        $label = $m.Groups[1].Value
-        if (-not $label) { continue }
-        if (-not $seen.Add($label)) { continue }
+    foreach ($lm in $lineMatches) {
+        $line = $lm.Value
+        if ($null -eq $line) { continue }
+        $commentInfo = Get-CommentInfoForLine -Line $line -Extension $Extension -InPsBlockComment:$inPsBlockComment
+        $inPsBlockComment = [bool]$commentInfo.InPsBlockComment
+        $lineCommentStart = [int]$commentInfo.CommentStart
+        $lineIsComment = [bool]$commentInfo.IsCommentLine
+
+        $lineMatchesLinks = [regex]::Matches($line, $pattern)
+        foreach ($m in $lineMatchesLinks) {
+            $label = $m.Groups[1].Value
+            if (-not $label) { continue }
+            if (-not $labelFlags.ContainsKey($label)) {
+                $labelFlags[$label] = [ordered]@{
+                    HasComment    = $false
+                    HasNonComment = $false
+                }
+            }
+            $isComment = $false
+            if ($lineIsComment) {
+                if ($lineCommentStart -lt 0 -or $m.Index -ge $lineCommentStart) {
+                    $isComment = $true
+                }
+            }
+            if ($isComment) { $labelFlags[$label].HasComment = $true }
+            else { $labelFlags[$label].HasNonComment = $true }
+        }
+    }
+
+    foreach ($label in $labelFlags.Keys) {
+        $isCommentLink = -not [bool]$labelFlags[$label].HasNonComment
 
         $fileName = [System.IO.Path]::GetFileName($label)
         $localTargets = $null
@@ -317,6 +436,7 @@ function Get-LinksFromContent {
                     SourcePath = $SourcePath
                     TargetPath = $targetNode.FullPath
                     Label      = $label
+                    IsCommentLink = $isCommentLink
                 }) | Out-Null
             }
         }
@@ -330,6 +450,7 @@ function Get-LinksFromContent {
                 SourcePath = $SourcePath
                 TargetPath = $ExternalNodesByLabel[$label].FullPath
                 Label      = $label
+                IsCommentLink = $isCommentLink
             }) | Out-Null
         }
     }
@@ -380,6 +501,7 @@ function Export-ScriptLinksFlowchartHtml {
                 targetPath     = $_.TargetPath
                 label          = $_.Label
                 isCrossBoundary = [bool]$_.IsCrossBoundary
+                isCommentLink  = [bool]$_.IsCommentLink
             }
         }
     )
@@ -643,7 +765,7 @@ $dropdownTopOptions
 
       // Layout-Kanten unsichtbar machen
       for (var k = 0; k < layoutEdgeCount; k++) {
-        lines.push('  linkStyle ' + k + ' stroke:none,stroke-width:0');
+        lines.push('  linkStyle ' + k + ' stroke:transparent,fill:transparent,color:transparent,stroke-width:0,opacity:0');
       }
       // Cross-Boundary-Kanten rot hervorheben
       crossIndices.forEach(function(idx) {
@@ -821,6 +943,10 @@ $dropdownTopOptions
         <input id="toggle-hide-external" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
         Externe Verknüpfungen ausblenden
       </label>
+      <label class="flex items-center gap-2 text-sm text-gray-700">
+        <input id="toggle-hide-comment-links" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+        Verknüpfungen aus Kommentaren ausblenden
+      </label>
     </div>
 
     <section class="mb-8 bg-white rounded-xl shadow p-4">
@@ -866,6 +992,7 @@ $dropdownTopOptions
     var zoomInBtn = document.getElementById('zoom-in');
     var zoomLabel = document.getElementById('zoom-label');
     var hideExternalToggle = document.getElementById('toggle-hide-external');
+    var hideCommentLinksToggle = document.getElementById('toggle-hide-comment-links');
     var codeSectionsEl = document.getElementById('code-sections');
     var renderId = 0;
     var currentZoom = 1.0;
@@ -1122,7 +1249,7 @@ $dropdownTopOptions
 
       // Layout-Kanten unsichtbar machen
       for (var k = 0; k < layoutEdgeCount; k++) {
-        lines.push('  linkStyle ' + k + ' stroke:none,stroke-width:0');
+        lines.push('  linkStyle ' + k + ' stroke:transparent,fill:transparent,color:transparent,stroke-width:0,opacity:0');
       }
       // Cross-Boundary-Kanten rot hervorheben
       crossIndices.forEach(function(idx) {
@@ -1199,6 +1326,10 @@ $dropdownTopOptions
       var nodes = (currentData && currentData.nodes) || [];
       var edges = (currentData && currentData.edges) || [];
 
+      if (hideCommentLinksToggle && hideCommentLinksToggle.checked) {
+        edges = edges.filter(function(e) { return !e.isCommentLink; });
+      }
+
       // Optional: alle roten Verweise (Cross-Boundary) inkl. deren Fremd-/Externe Knoten ausblenden
       if (hideExternalToggle && hideExternalToggle.checked) {
         if (currentTopVal && currentTopVal !== '[Extern]') {
@@ -1270,6 +1401,11 @@ $dropdownTopOptions
     }
     if (hideExternalToggle) {
       hideExternalToggle.addEventListener('change', function() {
+        renderCurrentData();
+      });
+    }
+    if (hideCommentLinksToggle) {
+      hideCommentLinksToggle.addEventListener('change', function() {
         renderCurrentData();
       });
     }
@@ -1384,7 +1520,7 @@ foreach ($f in $allFiles) {
         $nodesByPath[$f.FullName].Content = $content
     }
 
-    $edges = Get-LinksFromContent -Content $content -SourcePath $f.FullName -NameIndex $nameIndex -ExternalNodesByLabel $externalNodesByLabel -NodesByPath $nodesByPath -NodeList $nodeList -RootPath $rootPath -NextId $nextId
+    $edges = Get-LinksFromContent -Content $content -SourcePath $f.FullName -Extension $ext -NameIndex $nameIndex -ExternalNodesByLabel $externalNodesByLabel -NodesByPath $nodesByPath -NodeList $nodeList -RootPath $rootPath -NextId $nextId
     foreach ($e in $edges) {
         $edgeListRaw.Add($e) | Out-Null
     }
@@ -1393,7 +1529,7 @@ Write-Progress -Activity 'Analysiere Dateiverknüpfungen' -Completed
 
 # Aus den Roh-Kanten die endgültige Kantenliste mit Knoten-IDs und Cross-Boundary-Flag bauen
 $edgesFinal = New-Object System.Collections.Generic.List[object]
-$edgeKeys = @{}
+$edgeIndexByKey = @{}
 
 foreach ($e in $edgeListRaw) {
     $srcPath = $e.SourcePath
@@ -1405,22 +1541,31 @@ foreach ($e in $edgeListRaw) {
     $tgtNode = $nodesByPath[$tgtPath]
 
     $edgeKey = "$($srcNode.Id)->$($tgtNode.Id)"
-    if ($edgeKeys.ContainsKey($edgeKey)) { continue }
-    $edgeKeys[$edgeKey] = $true
-
     $isCross = $false
     if ($tgtNode.IsExternal -or $srcNode.TopFolder -ne $tgtNode.TopFolder) {
         $isCross = $true
     }
 
-    $edgesFinal.Add([pscustomobject]@{
-        SourceId       = $srcNode.Id
-        TargetId       = $tgtNode.Id
-        SourcePath     = $srcNode.FullPath
-        TargetPath     = $tgtNode.FullPath
-        Label          = $e.Label
+    if ($edgeIndexByKey.ContainsKey($edgeKey)) {
+        $existing = $edgesFinal[$edgeIndexByKey[$edgeKey]]
+        if ($existing.IsCommentLink -and -not [bool]$e.IsCommentLink) {
+            $existing.IsCommentLink = $false
+            if ($e.Label) { $existing.Label = $e.Label }
+        }
+        continue
+    }
+
+    $edgeObj = [pscustomobject]@{
+        SourceId        = $srcNode.Id
+        TargetId        = $tgtNode.Id
+        SourcePath      = $srcNode.FullPath
+        TargetPath      = $tgtNode.FullPath
+        Label           = $e.Label
         IsCrossBoundary = $isCross
-    }) | Out-Null
+        IsCommentLink   = [bool]$e.IsCommentLink
+    }
+    $edgesFinal.Add($edgeObj) | Out-Null
+    $edgeIndexByKey[$edgeKey] = $edgesFinal.Count - 1
 }
 
 Write-Host ("Verknüpfungen gefunden: {0}" -f $edgesFinal.Count) -ForegroundColor Cyan
@@ -1499,6 +1644,7 @@ foreach ($tf in $internalTopFolders) {
                 targetPath     = $_.TargetPath
                 label          = $_.Label
                 isCrossBoundary = [bool]$_.IsCrossBoundary
+                isCommentLink  = [bool]$_.IsCommentLink
             }
         }
     )
@@ -1553,6 +1699,7 @@ if ($hasExternalNodes) {
                     targetPath     = $_.TargetPath
                     label          = $_.Label
                     isCrossBoundary = [bool]$_.IsCrossBoundary
+                    isCommentLink  = [bool]$_.IsCommentLink
                 }
             }
         )

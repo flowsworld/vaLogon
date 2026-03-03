@@ -87,9 +87,10 @@ Der Fokus liegt auf **Security**, **Abhängigkeiten**, **Nutzung**, **Duplikaten
   Erweiterter Flowchart-Export für **alle Dateitypen** (nicht nur Skripte):
   - Erstellt Knoten für alle Dateien unter `ScriptsPath` (inkl. z. B. `.exe`, `.dll`, `.lnk`, `.ini`, `.xml`, `.json`, `.txt`).
   - Erkennt Dateiverknüpfungen über Dateinamen in textbasierten Dateien und zeichnet Kanten (inkl. cross-boundary/extern).
+  - Kommentarbewusste Erkennung: Verknüpfungen in Kommentaren (`rem`, `::`, `#`, `<# #>`, `'`, `;` je Dateityp) werden separat als Kommentar-Link markiert und können im Viewer ein-/ausgeblendet werden.
   - Exportiert pro Top-Ordner eine eigene JSON-Datei (`ScriptFlowchart-All-<Top>.json`) und erzeugt eine HTML-Template-Datei (`ScriptFlowchart-All.html`), die die Daten dynamisch lädt.
   - Funktioniert auch im `file://`-Modus: Für lokale Öffnung sind die Top-Ordner-Daten zusätzlich im HTML eingebettet.
-  - UI-Funktionen: Top-Ordner-Auswahl, Zoom (100–1000 %), Ausblenden externer/roter Verknüpfungen, dynamischer Codebereich unter dem Flowchart mit markierten Verknüpfungspunkten (gelb intern, rot extern).
+  - UI-Funktionen: Top-Ordner-Auswahl, Zoom (100–1000 %), Ausblenden externer/roter Verknüpfungen, Ausblenden von Verknüpfungen aus Kommentaren, dynamischer Codebereich unter dem Flowchart mit markierten Verknüpfungspunkten (gelb intern, rot extern).
   - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\ScriptFlowchart-All.html`), `-ExcludeFolders`, `-Encoding`.
 
 - `Analyze-LoginScriptCategories.ps1`  
@@ -192,7 +193,7 @@ Ausgabe:
 - `ScriptFlowchart-All.html` als Viewer/Template
 - `ScriptFlowchart-All-<Top>.json` pro Top-Ordner (z. B. `...-2117.json`)
 
-Die HTML bietet Top-Ordner-Auswahl, Zoom, optionales Ausblenden externer/roter Verknüpfungen sowie einen dynamischen Bereich „Dateien und Inhalt“ unterhalb des Diagramms mit farblicher Markierung der Verknüpfungspunkte.
+Die HTML bietet Top-Ordner-Auswahl, Zoom, optionales Ausblenden externer/roter Verknüpfungen, optionales Ausblenden von Verknüpfungen aus Kommentaren sowie einen dynamischen Bereich „Dateien und Inhalt“ unterhalb des Diagramms mit farblicher Markierung der Verknüpfungspunkte.
 
 #### Login-Skript Kategorien (statistische Analyse)
 
