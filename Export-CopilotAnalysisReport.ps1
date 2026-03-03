@@ -120,6 +120,80 @@ function Get-RelativePath {
     return $FullPath
 }
 
+function Get-SafeFileHash {
+    param([string]$Path)
+    try {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+    }
+    catch {
+        return ''
+    }
+}
+
+function Convert-ToDisplayName {
+    param([string]$FullPath)
+    if ([string]::IsNullOrWhiteSpace($FullPath)) { return '' }
+    return [System.IO.Path]::GetFileName($FullPath)
+}
+
+function Test-IsLikelyText {
+    param([byte[]]$Bytes)
+    if (-not $Bytes -or $Bytes.Length -eq 0) { return $true }
+    $probeLen = [Math]::Min($Bytes.Length, 4096)
+    $nullByteCount = 0
+    for ($i = 0; $i -lt $probeLen; $i++) {
+        if ($Bytes[$i] -eq 0) { $nullByteCount++ }
+    }
+    if ($nullByteCount -gt 0) { return $false }
+    return $true
+}
+
+function Get-ReadableFileContent {
+    param([string]$Path)
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        if (-not (Test-IsLikelyText -Bytes $bytes)) {
+            return [pscustomobject]@{
+                IsReadable = $false
+                Content    = ''
+                Reason     = 'Datei wirkt binär (Null-Bytes erkannt)'
+            }
+        }
+
+        $encodings = @(
+            [System.Text.Encoding]::UTF8,
+            [System.Text.Encoding]::Unicode,
+            [System.Text.Encoding]::BigEndianUnicode,
+            [System.Text.Encoding]::ASCII
+        )
+        foreach ($enc in $encodings) {
+            try {
+                $text = $enc.GetString($bytes)
+                if ($null -ne $text) {
+                    return [pscustomobject]@{
+                        IsReadable = $true
+                        Content    = $text
+                        Reason     = ''
+                    }
+                }
+            } catch {}
+        }
+
+        return [pscustomobject]@{
+            IsReadable = $false
+            Content    = ''
+            Reason     = 'Textkodierung konnte nicht sicher gelesen werden'
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            IsReadable = $false
+            Content    = ''
+            Reason     = $_.Exception.Message
+        }
+    }
+}
+
 # Skript-Liste ermitteln
 $inventory = @()
 $usageByPath = @{}
@@ -186,35 +260,38 @@ $rows = [System.Collections.ArrayList]::new()
 
 foreach ($inv in $inventory) {
     $fullPath = [string]$inv.FullPath
-    $relPath = Get-RelativePath -FullPath $fullPath
+    $displayName = Convert-ToDisplayName -FullPath $fullPath
     $ext = $inv.Extension
     $usage = $inv.UsageCategory
     $risk = $securityMaxRiskByPath[$fullPath]
     if (-not $risk) { $risk = '—' }
+    $hash = Get-SafeFileHash -Path $fullPath
 
-    $content = $null
-    try {
-        $content = Get-Content -LiteralPath $fullPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-    } catch {}
-    $category = Get-FileCategoryResult -Content ($content ?? '') -CategoryPatterns $patterns
+    $contentInfo = Get-ReadableFileContent -Path $fullPath
+    $content = if ($contentInfo.IsReadable) { [string]$contentInfo.Content } else { '' }
+    $category = Get-FileCategoryResult -Content $content -CategoryPatterns $patterns
     $gpoRec = Get-GpoRecommendation -Category $category
 
     $inEdges = @($edges | Where-Object { [string]$_.TargetPath -eq $fullPath })
     $outEdges = @($edges | Where-Object { [string]$_.SourcePath -eq $fullPath })
-    $callers = ($inEdges | ForEach-Object { Get-RelativePath -FullPath $_.SourcePath } | Where-Object { $_ }) -join '; '
-    $callees = ($outEdges | ForEach-Object { Get-RelativePath -FullPath $_.TargetPath } | Where-Object { $_ }) -join '; '
+    $callers = ($inEdges | ForEach-Object { Convert-ToDisplayName -FullPath ([string]$_.SourcePath) } | Where-Object { $_ }) -join '; '
+    $callees = ($outEdges | ForEach-Object { Convert-ToDisplayName -FullPath ([string]$_.TargetPath) } | Where-Object { $_ }) -join '; '
     if (-not $callers) { $callers = '—' }
     if (-not $callees) { $callees = '—' }
     $deps = "Aufrufer: $callers | Aufgerufen: $callees"
 
     [void]$rows.Add([pscustomobject]@{
-        RelativePath   = $relPath
+        FileName       = $displayName
         Type           = $ext
         Category       = $category
         Usage          = $usage
         Risk           = $risk
+        Hash           = $hash
         Dependencies   = $deps
         GpoRecommendation = $gpoRec
+        IsReadable     = $contentInfo.IsReadable
+        Content        = $content
+        ReadError      = $contentInfo.Reason
     })
 }
 
@@ -222,16 +299,52 @@ foreach ($inv in $inventory) {
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine("# Skript-Analyse für Microsoft 365 Copilot")
 [void]$sb.AppendLine("")
-[void]$sb.AppendLine('Dieser Report listet alle erfassten Logon-/Skriptdateien mit Kategorie, Nutzung, Kritikalität, Abhängigkeiten und empfohlener GPO-Migration. Zur Auswertung in Word oder Teams öffnen und mit Copilot z.B. fragen: "Analysiere diese Skripte auf Kritikalität" oder "Welche GPO-Einstellungen ersetzen diese Logon-Skripte?".')
+[void]$sb.AppendLine('Dieser Report listet alle erfassten Logon-/Skriptdateien mit Kategorie, Nutzung, Kritikalität, Abhängigkeiten, Hash und empfohlener GPO-Migration. Der tatsächliche Dateiinhalt wird pro Datei eingebettet (sofern lesbar). Für nicht lesbare Dateien werden Recherchehinweise aus Metadaten bereitgestellt. Zur Auswertung in Word oder Teams öffnen und mit Copilot z.B. fragen: "Analysiere diese Skripte auf Kritikalität" oder "Welche GPO-Einstellungen ersetzen diese Logon-Skripte?".')
 [void]$sb.AppendLine("")
-[void]$sb.AppendLine("| Relativer Pfad | Typ | Kategorie | Nutzung | Risiko | Abhängigkeiten | GPO-Empfehlung |")
-[void]$sb.AppendLine("|---------------|-----|-----------|---------|--------|----------------|----------------|")
+[void]$sb.AppendLine("| Datei | Typ | Kategorie | Nutzung | Risiko | SHA256 | Abhängigkeiten | GPO-Empfehlung |")
+[void]$sb.AppendLine("|-------|-----|-----------|---------|--------|--------|----------------|----------------|")
 
 foreach ($r in $rows) {
-    $rel = $r.RelativePath -replace '\|', '\|' -replace '\r?\n', ' '
+    $name = $r.FileName -replace '\|', '\|' -replace '\r?\n', ' '
     $deps = $r.Dependencies -replace '\|', '\|' -replace '\r?\n', ' '
     $gpo = $r.GpoRecommendation -replace '\|', '\|' -replace '\r?\n', ' '
-    [void]$sb.AppendLine("| $rel | $($r.Type) | $($r.Category) | $($r.Usage) | $($r.Risk) | $deps | $gpo |")
+    $hashCol = if ($r.Hash) { $r.Hash } else { '—' }
+    [void]$sb.AppendLine("| $name | $($r.Type) | $($r.Category) | $($r.Usage) | $($r.Risk) | $hashCol | $deps | $gpo |")
+}
+
+[void]$sb.AppendLine("")
+[void]$sb.AppendLine("## Dateiinhalte für Copilot")
+[void]$sb.AppendLine("")
+foreach ($r in ($rows | Sort-Object -Property FileName)) {
+    [void]$sb.AppendLine("### $($r.FileName)")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("- Typ: $($r.Type)")
+    [void]$sb.AppendLine("- Kategorie: $($r.Category)")
+    [void]$sb.AppendLine("- Nutzung: $($r.Usage)")
+    [void]$sb.AppendLine("- Risiko: $($r.Risk)")
+    [void]$sb.AppendLine("- SHA256: $(if ($r.Hash) { $r.Hash } else { '—' })")
+    [void]$sb.AppendLine("- Abhängigkeiten: $($r.Dependencies)")
+    [void]$sb.AppendLine("")
+    if ($r.IsReadable) {
+        [void]$sb.AppendLine('```text')
+        [void]$sb.AppendLine($r.Content)
+        [void]$sb.AppendLine('```')
+    }
+    else {
+        [void]$sb.AppendLine("> Dateiinhalt nicht direkt lesbar.")
+        if ($r.ReadError) {
+            [void]$sb.AppendLine("> Grund: $($r.ReadError)")
+        }
+        [void]$sb.AppendLine("> Copilot-Recherchehinweis:")
+        [void]$sb.AppendLine("> Prüfe Dateiname, Dateityp, SHA256-Hash und bekannte Indikatoren (Signatur/Produktname/typische Nutzung), um Zweck und Risiko einzuordnen.")
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine('```text')
+        [void]$sb.AppendLine("Dateiname: $($r.FileName)")
+        [void]$sb.AppendLine("Dateityp: $($r.Type)")
+        [void]$sb.AppendLine("SHA256: $(if ($r.Hash) { $r.Hash } else { '—' })")
+        [void]$sb.AppendLine('```')
+    }
+    [void]$sb.AppendLine("")
 }
 
 [void]$sb.AppendLine("")

@@ -70,6 +70,103 @@ $script:TextLikeExtensions = @(
 
 # Dateiendungen, nach denen im Text explizit gesucht wird, um Verknüpfungen zu erkennen.
 $script:LinkExtensionsPattern = 'vbs|bat|cmd|ps1|psm1|kix|exe|dll|msi|lnk|url|txt|log|ini|cfg|config|xml|json|csv'
+$script:BackupSuffixTokens = @(
+    '.old', '.bak', '.tmp', '.alt',
+    '.orig', '.save', '.sav', '.backup', '.copy', '.prev',
+    '_old', '_bak', '_tmp', '_alt',
+    '_orig', '_save', '_sav', '_backup', '_copy', '_prev',
+    '-old', '-bak', '-tmp', '-alt',
+    '-orig', '-save', '-sav', '-backup', '-copy', '-prev',
+    '~'
+)
+
+function Get-EffectiveExtensionInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fileName = [System.IO.Path]::GetFileName($Path)
+    if ([string]::IsNullOrWhiteSpace($fileName)) {
+        return [pscustomobject]@{
+            OriginalExtension  = ''
+            EffectiveExtension = ''
+            NormalizedName     = ''
+        }
+    }
+
+    $normalizedName = $fileName.ToLowerInvariant()
+    $changed = $true
+    while ($changed -and $normalizedName.Length -gt 0) {
+        $changed = $false
+        foreach ($token in $script:BackupSuffixTokens) {
+            if ([string]::IsNullOrWhiteSpace($token)) { continue }
+            if ($normalizedName.EndsWith($token, [StringComparison]::OrdinalIgnoreCase)) {
+                $normalizedName = $normalizedName.Substring(0, $normalizedName.Length - $token.Length)
+                $changed = $true
+                break
+            }
+        }
+    }
+
+    $originalExt = [System.IO.Path]::GetExtension($fileName).ToLowerInvariant()
+    $effectiveExt = [System.IO.Path]::GetExtension($normalizedName).ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($effectiveExt)) {
+        $effectiveExt = $originalExt
+    }
+
+    return [pscustomobject]@{
+        OriginalExtension  = $originalExt
+        EffectiveExtension = $effectiveExt
+        NormalizedName     = $normalizedName
+    }
+}
+
+function Test-IsLikelyBinaryByHeader {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [byte[]]$Bytes
+    )
+
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) { return $false }
+
+    $probeLen = [Math]::Min($Bytes.Length, 4096)
+    for ($i = 0; $i -lt $probeLen; $i++) {
+        if ($Bytes[$i] -eq 0) { return $true }
+    }
+
+    $signatures = @(
+        ([byte[]](0x4D,0x5A)),                                  # MZ / PE
+        ([byte[]](0x50,0x4B,0x03,0x04)),                        # ZIP
+        ([byte[]](0x50,0x4B,0x05,0x06)),                        # ZIP (empty archive)
+        ([byte[]](0x50,0x4B,0x07,0x08)),                        # ZIP (spanned)
+        ([byte[]](0x25,0x50,0x44,0x46)),                        # PDF
+        ([byte[]](0xD0,0xCF,0x11,0xE0,0xA1,0xB1,0x1A,0xE1)),    # OLE Compound
+        ([byte[]](0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A)),    # PNG
+        ([byte[]](0x47,0x49,0x46,0x38)),                        # GIF
+        ([byte[]](0xFF,0xD8,0xFF)),                             # JPEG
+        ([byte[]](0x1F,0x8B)),                                  # GZIP
+        ([byte[]](0x37,0x7A,0xBC,0xAF,0x27,0x1C)),              # 7z
+        ([byte[]](0x52,0x61,0x72,0x21,0x1A,0x07)),              # RAR
+        ([byte[]](0x7F,0x45,0x4C,0x46))                         # ELF
+    )
+
+    foreach ($sig in $signatures) {
+        if ($Bytes.Length -lt $sig.Length) { continue }
+        $match = $true
+        for ($j = 0; $j -lt $sig.Length; $j++) {
+            if ($Bytes[$j] -ne $sig[$j]) {
+                $match = $false
+                break
+            }
+        }
+        if ($match) { return $true }
+    }
+
+    return $false
+}
 
 function Get-FileContentSafe {
     [CmdletBinding()]
@@ -81,6 +178,20 @@ function Get-FileContentSafe {
     )
     try {
         $fileInfo = Get-Item -LiteralPath $Path -ErrorAction Stop
+
+        if ($fileInfo.Length -gt 0) {
+            $probeFs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            try {
+                $probeSize = [int][Math]::Min([int64]8192, $fileInfo.Length)
+                $probe = New-Object byte[] $probeSize
+                [void]$probeFs.Read($probe, 0, $probeSize)
+                if (Test-IsLikelyBinaryByHeader -Bytes $probe) {
+                    return $null
+                }
+            }
+            finally { $probeFs.Close() }
+        }
+
         if ($fileInfo.Length -gt $MaxBytes) {
             $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
             try {
@@ -355,7 +466,9 @@ function New-Node {
 
     $displayName = [System.IO.Path]::GetFileName($FullPath)
     if (-not $displayName) { $displayName = $FullPath }
-    $ext = [System.IO.Path]::GetExtension($FullPath).ToLowerInvariant()
+    $extInfo = Get-EffectiveExtensionInfo -Path $FullPath
+    $extOriginal = [string]$extInfo.OriginalExtension
+    $ext = [string]$extInfo.EffectiveExtension
 
     $type = switch ($ext) {
         '.vbs'   { 'VBS' }
@@ -401,7 +514,8 @@ function New-Node {
         Id           = $id
         FullPath     = $FullPath
         DisplayName  = $displayName
-        Extension    = $ext
+        Extension    = $extOriginal
+        EffectiveExtension = $ext
         Type         = $type
         TopFolder    = $topFolder
         RelativePath = $relativePath
@@ -1660,7 +1774,8 @@ foreach ($f in $allFiles) {
     if (Test-IsExcludedPath -FullPath $f.FullName -RootPath $rootPath -ExcludePrefixes $normalizedExclude) {
         continue
     }
-    $ext = $f.Extension.ToLowerInvariant()
+    $extInfo = Get-EffectiveExtensionInfo -Path $f.FullName
+    $ext = [string]$extInfo.EffectiveExtension
     if (-not ($script:TextLikeExtensions -contains $ext)) {
         continue
     }
