@@ -118,6 +118,75 @@ function Get-SanitizedContentForJson {
     return $sanitized
 }
 
+function Get-PowerShellCommentStartInfo {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Line
+    )
+    if ($null -eq $Line -or $Line.Length -eq 0) { return $null }
+
+    $inSingle = $false
+    $inDouble = $false
+    $escapeInDouble = $false
+    $len = $Line.Length
+
+    for ($i = 0; $i -lt $len; $i++) {
+        $ch = $Line[$i]
+
+        if ($inSingle) {
+            if ($ch -eq "'") {
+                # In PowerShell wird ein einzelnes Apostroph in Single-Quoted Strings durch '' escaped.
+                if ($i + 1 -lt $len -and $Line[$i + 1] -eq "'") {
+                    $i++
+                    continue
+                }
+                $inSingle = $false
+            }
+            continue
+        }
+
+        if ($inDouble) {
+            if ($escapeInDouble) {
+                $escapeInDouble = $false
+                continue
+            }
+            if ($ch -eq '`') {
+                $escapeInDouble = $true
+                continue
+            }
+            if ($ch -eq '"') {
+                $inDouble = $false
+            }
+            continue
+        }
+
+        if ($ch -eq "'") {
+            $inSingle = $true
+            continue
+        }
+        if ($ch -eq '"') {
+            $inDouble = $true
+            continue
+        }
+
+        if ($ch -eq '<' -and $i + 1 -lt $len -and $Line[$i + 1] -eq '#') {
+            return [pscustomobject]@{
+                Kind  = 'Block'
+                Index = $i
+            }
+        }
+        if ($ch -eq '#') {
+            return [pscustomobject]@{
+                Kind  = 'Line'
+                Index = $i
+            }
+        }
+    }
+
+    return $null
+}
+
 function Get-CommentInfoForLine {
     [CmdletBinding()]
     param(
@@ -148,22 +217,18 @@ function Get-CommentInfoForLine {
             }
             return [pscustomobject]$result
         }
-        $psBlockStart = '<' + '#'
         $psBlockEnd = '#' + '>'
-        $startBlockIdx = $Line.IndexOf($psBlockStart)
-        if ($startBlockIdx -ge 0) {
-            $endIdxSame = $Line.IndexOf($psBlockEnd, $startBlockIdx + 2)
-            $result.CommentStart = $startBlockIdx
+        $commentStartInfo = Get-PowerShellCommentStartInfo -Line $Line
+        if ($null -ne $commentStartInfo) {
+            $commentStartIdx = [int]$commentStartInfo.Index
+            $result.CommentStart = $commentStartIdx
             $result.IsCommentLine = $true
-            if ($endIdxSame -lt 0) {
-                $result.InPsBlockComment = $true
+            if ([string]$commentStartInfo.Kind -eq 'Block') {
+                $endIdxSame = $Line.IndexOf($psBlockEnd, $commentStartIdx + 2)
+                if ($endIdxSame -lt 0) {
+                    $result.InPsBlockComment = $true
+                }
             }
-            return [pscustomobject]$result
-        }
-        $hashIdx = $Line.IndexOf('#')
-        if ($hashIdx -ge 0) {
-            $result.IsCommentLine = $true
-            $result.CommentStart = $hashIdx
             return [pscustomobject]$result
         }
         return [pscustomobject]$result
@@ -735,6 +800,10 @@ $dropdownTopOptions
       for (var i = 0; i < depthKeys.length; i++) {
         var d = depthKeys[i];
         var anchors = anchorsByDepth[d] || [];
+        var canUseColumnLayoutEdges = anchors.length > 1;
+        if (!canUseColumnLayoutEdges) {
+          continue;
+        }
         for (var j = 0; j < anchors.length - 1; j++) {
           lines.push('  ' + anchors[j] + ' ~~~ ' + anchors[j + 1]);
           layoutEdgeCount++;
@@ -742,7 +811,7 @@ $dropdownTopOptions
         if (i < depthKeys.length - 1) {
           var nextD = depthKeys[i + 1];
           var nextAnchors = anchorsByDepth[nextD] || [];
-          if (anchors.length > 0 && nextAnchors.length > 0) {
+          if (nextAnchors.length > 1) {
             lines.push('  ' + anchors[anchors.length - 1] + ' --> ' + nextAnchors[0]);
             layoutEdgeCount++;
           }
@@ -994,9 +1063,11 @@ $dropdownTopOptions
     var hideExternalToggle = document.getElementById('toggle-hide-external');
     var hideCommentLinksToggle = document.getElementById('toggle-hide-comment-links');
     var codeSectionsEl = document.getElementById('code-sections');
+    var mermaidWrapper = document.getElementById('mermaid-wrapper');
     var renderId = 0;
     var currentZoom = 1.0;
     var currentData = null;
+    var currentRenderedNodes = [];
     var currentTopVal = '';
 
     function escapeMermaidLabel(s) {
@@ -1032,6 +1103,52 @@ $dropdownTopOptions
       apply(externalLabels, 'bg-red-200 text-red-900 rounded px-0.5 font-semibold', 'Externe/übergreifende Verknüpfung');
       apply(internalLabels, 'bg-amber-300 text-amber-950 rounded px-0.5 font-semibold', 'Interne Verknüpfung');
       return escaped;
+    }
+
+    function findDiagramNodeElement(nodeId) {
+      if (!nodeId || !mermaidTarget) return null;
+      var svg = mermaidTarget.querySelector('svg');
+      if (!svg) return null;
+      var selectors = [
+        'g.node[data-id="' + nodeId + '"]',
+        'g.node[id="' + nodeId + '"]',
+        'g.node[id*="-' + nodeId + '-"]',
+        'g.node[id$="-' + nodeId + '"]',
+        'g.node[id^="' + nodeId + '-"]'
+      ];
+      for (var i = 0; i < selectors.length; i++) {
+        var el = svg.querySelector(selectors[i]);
+        if (el) return el;
+      }
+      return null;
+    }
+
+    function flashNode(nodeEl) {
+      if (!nodeEl) return;
+      var shape = nodeEl.querySelector('rect, polygon, path, ellipse, circle');
+      if (!shape) return;
+      var oldStroke = shape.style.stroke || '';
+      var oldStrokeWidth = shape.style.strokeWidth || '';
+      shape.style.stroke = '#2563eb';
+      shape.style.strokeWidth = '4px';
+      setTimeout(function() {
+        shape.style.stroke = oldStroke;
+        shape.style.strokeWidth = oldStrokeWidth;
+      }, 1200);
+    }
+
+    function scrollToNodeInDiagram(nodeId) {
+      var nodeEl = findDiagramNodeElement(nodeId);
+      if (!nodeEl || !mermaidWrapper) return;
+      mermaidWrapper.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(function() {
+        var wrapperRect = mermaidWrapper.getBoundingClientRect();
+        var nodeRect = nodeEl.getBoundingClientRect();
+        var dx = (nodeRect.left - wrapperRect.left) - (mermaidWrapper.clientWidth / 2) + (nodeRect.width / 2);
+        var dy = (nodeRect.top - wrapperRect.top) - (mermaidWrapper.clientHeight / 2) + (nodeRect.height / 2);
+        mermaidWrapper.scrollBy({ left: dx, top: dy, behavior: 'smooth' });
+        flashNode(nodeEl);
+      }, 120);
     }
 
     function renderCodeSections(nodes, edges) {
@@ -1079,8 +1196,11 @@ $dropdownTopOptions
         }
 
         html.push(
-          '<section class="border border-gray-200 rounded-lg p-3">' +
-          '<h3 class="text-sm font-semibold text-gray-800 mb-1">' + escapeHtml((n.displayName || n.id) + (n.type ? ' (' + n.type + ')' : '')) + '</h3>' +
+          '<section id="code-' + escapeHtml(n.id) + '" class="border border-gray-200 rounded-lg p-3 scroll-mt-24">' +
+          '<div class="mb-1 flex flex-wrap items-center justify-between gap-2">' +
+          '<h3 class="text-sm font-semibold text-gray-800">' + escapeHtml((n.displayName || n.id) + (n.type ? ' (' + n.type + ')' : '')) + '</h3>' +
+          '<button type="button" class="jump-to-node inline-flex items-center rounded border border-blue-200 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50" data-node-id="' + escapeHtml(n.id) + '">Zum Knoten im Flowchart</button>' +
+          '</div>' +
           '<p class="text-xs text-gray-500 font-mono mb-2">' + escapeHtml(n.fullPath || '') + '</p>' +
           '<pre class="bg-gray-900 text-gray-100 p-3 rounded overflow-x-auto text-xs"><code>' + codeHtml + '</code></pre>' +
           '</section>'
@@ -1212,6 +1332,7 @@ $dropdownTopOptions
         if (s) {
           lines.push('  style ' + n.id + ' ' + s);
         }
+        lines.push('  click ' + n.id + ' href "#code-' + n.id + '" "Zur Datei springen"');
       });
 
       // Layout-Kanten: unsichtbare Verbindungen zwischen Tiefen, um links-rechts-Anordnung zu erzwingen
@@ -1219,6 +1340,10 @@ $dropdownTopOptions
       for (var i = 0; i < depthKeys.length; i++) {
         var d = depthKeys[i];
         var anchors = anchorsByDepth[d] || [];
+        var canUseColumnLayoutEdges = anchors.length > 1;
+        if (!canUseColumnLayoutEdges) {
+          continue;
+        }
         for (var j = 0; j < anchors.length - 1; j++) {
           lines.push('  ' + anchors[j] + ' ~~~ ' + anchors[j + 1]);
           layoutEdgeCount++;
@@ -1226,7 +1351,7 @@ $dropdownTopOptions
         if (i < depthKeys.length - 1) {
           var nextD = depthKeys[i + 1];
           var nextAnchors = anchorsByDepth[nextD] || [];
-          if (anchors.length > 0 && nextAnchors.length > 0) {
+          if (nextAnchors.length > 1) {
             lines.push('  ' + anchors[anchors.length - 1] + ' --> ' + nextAnchors[0]);
             layoutEdgeCount++;
           }
@@ -1279,6 +1404,19 @@ $dropdownTopOptions
           result.bindFunctions(mermaidTarget);
         }
         applyZoom();
+        (currentRenderedNodes || []).forEach(function(n) {
+          var nodeEl = findDiagramNodeElement(n.id);
+          if (!nodeEl) return;
+          nodeEl.style.cursor = 'pointer';
+          nodeEl.addEventListener('click', function() {
+            var target = document.getElementById('code-' + n.id);
+            if (!target) return;
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            if (history && history.replaceState) {
+              history.replaceState(null, '', '#code-' + n.id);
+            }
+          });
+        });
       }).catch(function(err) {
         mermaidTarget.textContent = 'Diagramm-Fehler: ' + (err.message || String(err));
       });
@@ -1347,6 +1485,7 @@ $dropdownTopOptions
       }
 
       var code = buildMermaidCode(nodes, edges);
+      currentRenderedNodes = nodes.slice();
       renderMermaid(code);
       renderCodeSections(nodes, edges);
     }
@@ -1407,6 +1546,19 @@ $dropdownTopOptions
     if (hideCommentLinksToggle) {
       hideCommentLinksToggle.addEventListener('change', function() {
         renderCurrentData();
+      });
+    }
+    if (codeSectionsEl) {
+      codeSectionsEl.addEventListener('click', function(ev) {
+        var btn = ev.target && ev.target.closest ? ev.target.closest('.jump-to-node') : null;
+        if (!btn) return;
+        ev.preventDefault();
+        var nodeId = btn.getAttribute('data-node-id');
+        if (!nodeId) return;
+        scrollToNodeInDiagram(nodeId);
+        if (history && history.replaceState) {
+          history.replaceState(null, '', '#');
+        }
       });
     }
     if (zoomInBtn) {
