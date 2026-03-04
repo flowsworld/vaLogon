@@ -1257,7 +1257,10 @@ $dropdownTopOptions
   <script>
   (function() {
     var selectTop = document.getElementById('filter-topfolder');
+    var chunkModeSelect = document.getElementById('filter-chunk-mode');
+    var chunkSelect = document.getElementById('filter-chunk');
     var mermaidTarget = document.getElementById('mermaid-target');
+    var renderStatusEl = document.getElementById('render-status');
     var zoomRange = document.getElementById('zoom-range');
     var zoomOutBtn = document.getElementById('zoom-out');
     var zoomInBtn = document.getElementById('zoom-in');
