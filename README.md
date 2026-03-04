@@ -104,9 +104,10 @@ Der Fokus liegt auf **Security**, **Abhängigkeiten**, **Nutzung**, **Duplikaten
   Eigenständiges Skript zur **Host-Erreichbarkeitsanalyse**:
   - Scannt alle Skript- und Textdateien (`.ps1`, `.psm1`, `.bat`, `.cmd`, `.vbs`, `.kix`, `.txt`) unter `ScriptsPath` und extrahiert Servernamen und IP-Adressen per Regex (UNC-Pfade, URLs, IPv4).
   - Führt pro Host eine Erreichbarkeitsprüfung durch: DNS-Auflösung, Ping (ICMP), TCP-Ports (80, 443, 445, 135, 3389, 5985) parallel, optional WinRM (`Test-WSMan`).
-  - **Subnet-Scan (optional):** Pro ermitteltem Host wird das zugehörige Subnetz (Standard: /24) nach pingbaren Endpunkten durchsucht; die Ergebnisse erscheinen im HTML in einer eigenen Tabelle (Quell-Host, Subnetz, Anzahl erreichbar, Liste der IPs).
-  - Erzeugt eine HTML-Datei mit **Zusammenfassung**, **Erreichbarkeit pro Host** (farbige Indikatoren) und ggf. **Subnet-Scan** (pingbare IPs pro Subnetz).
-  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\HostReachabilityReport.html`), `-Encoding` (Fallback), `-ThrottleLimit` (Parallelität, Default: 8), `-SubnetScan` (Subnetz-Scan aktivieren, Default: an), `-SubnetPrefixLength` (CIDR, Default: 24).
+  - **Subnet-Scan (optional):** Pro ermitteltem Host wird das zugehörige Subnetz (Standard: /24) nach pingbaren Endpunkten durchsucht; die Ergebnisse erscheinen im HTML in einer eigenen Tabelle (Quell-Host, Subnetz, Anzahl erreichbar, Liste der IPs). Standardmäßig ist der Subnet-Scan **aus** und wird nur mit `-SubnetScan` aktiviert.
+  - Erzeugt ein HTML-Template plus Daten-JSONs: `HostReachability-ALL.json` und je Top-Ordner `HostReachability-<Top>.json`; das HTML lädt die gewählte Top-Ordner-JSON dynamisch nach.
+  - Resume/Checkpoint: robuster Resume-Modus über Checkpoint + Artefaktdateien (explizit via `-Resume`, automatisch ohne `-NoAutoResume`), optional persistente Zustände mit `-KeepResumeData`.
+  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\HostReachabilityReport.html`), `-Encoding` (Fallback), `-ThrottleLimit` (Parallelität, Default: 8), `-SubnetScan` (Subnetz-Scan aktivieren, Default: aus), `-SubnetPrefixLength` (CIDR, Default: 24), `-Resume`, `-NoAutoResume`, `-CheckpointPath`, `-KeepResumeData`.
 
 - `Export-CopilotAnalysisReport.ps1`  
   Erzeugt einen **Markdown-Report** zur Auswertung mit **Microsoft 365 Copilot** (Word, Teams):
@@ -220,9 +221,19 @@ pwsh.exe -File .\Analyze-SysvolHostReachability.ps1 `
     -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
 ```
 
-Optional: `-OutputPath 'D:\Reports\HostReachabilityReport.html'`, `-Encoding`, `-ThrottleLimit` (z. B. 4), `-SubnetScan` (Subnetz-Scan, Standard: an), `-SubnetPrefixLength` (z. B. 24 für /24).
+Optional: `-OutputPath 'D:\Reports\HostReachabilityReport.html'`, `-Encoding`, `-ThrottleLimit` (z. B. 4), `-SubnetScan` (Subnetz-Scan, Standard: aus), `-SubnetPrefixLength` (z. B. 24 für /24), `-Resume`, `-NoAutoResume`, `-CheckpointPath`, `-KeepResumeData`.
 
-Das Skript durchsucht alle Skript- und Textdateien nach Servernamen und IPs (UNC, `http(s)://`, IPv4), entfernt Duplikate und lokale Platzhalter (localhost, 127.0.0.1), und prüft jeden Host: DNS, Ping, TCP-Ports 80/443/445/135/3389/5985 (parallel), WinRM. Wenn **Subnet-Scan** aktiv ist, wird pro Host das zugehörige Subnetz (z. B. /24) ermittelt und nach erreichbaren (pingbaren) IP-Adressen durchsucht. Der HTML-Report enthält eine Zusammenfassung, eine Tabelle mit grünen/roten Badges pro Host (DNS, Ping, Ports, WinRM) und bei aktiviertem Subnet-Scan eine weitere Tabelle „Subnet-Scan (pingbare Endpunkte)“ mit Quell-Host, Subnetz, Anzahl erreichbarer IPs und Liste der IPs.
+Das Skript durchsucht alle Skript- und Textdateien nach Servernamen und IPs (UNC, `http(s)://`, IPv4), entfernt Duplikate und lokale Platzhalter (localhost, 127.0.0.1), und prüft jeden Host: DNS, Ping, TCP-Ports 80/443/445/135/3389/5985 (parallel), WinRM. Wenn **Subnet-Scan** aktiv ist, wird pro Host das zugehörige Subnetz (z. B. /24) ermittelt und nach erreichbaren (pingbaren) IP-Adressen durchsucht.  
+Ausgabe ist ein HTML-Template plus JSON-Datasets:
+- `HostReachability-ALL.json` (Gesamt)
+- `HostReachability-<Top>.json` (pro Top-Ordner)  
+Die HTML lädt die Daten je Top-Ordner dynamisch nach.
+
+Resume/Checkpoint:
+- Checkpoint-Datei (konfigurierbar über `-CheckpointPath`)
+- zusätzliche Artefaktdateien für robustes Fortsetzen (`*.host-results.json`, `*.subnet-data.json`)
+- Auto-Resume standardmäßig aktiv (abschaltbar via `-NoAutoResume`), explizites Resume via `-Resume`
+- bei erfolgreichem Lauf werden Resume-Dateien standardmäßig gelöscht (behaltbar via `-KeepResumeData`)
 
 #### Report für Microsoft 365 Copilot
 
