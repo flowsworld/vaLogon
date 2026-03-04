@@ -1124,6 +1124,7 @@ function Export-ScriptLinksFlowchartTemplate {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [string[]]$TopFolders,
         [Parameter(Mandatory = $true)]
         [hashtable]$EmbeddedData,
