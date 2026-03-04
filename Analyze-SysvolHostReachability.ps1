@@ -14,7 +14,9 @@
     Stammverzeichnis (z.B. \\domain\SYSVOL\domain\scripts). Muss existieren.
 
 .PARAMETER OutputPath
-    Pfad der zu erzeugenden HTML-Datei (Default: .\HostReachabilityReport.html).
+    Pfad der zu erzeugenden HTML-Datei.
+    Wenn nicht angegeben, wird standardmäßig im Skriptordner nach
+    HostReachabilityReport.html geschrieben.
 
 .PARAMETER Resume
     Erzwingt das Fortsetzen aus Checkpoint/Artefakten, falls vorhanden.
@@ -1046,7 +1048,18 @@ $rootResolved = Resolve-Path -Path $ScriptsPath -ErrorAction Stop
 # damit $rootPath zum Format von $f.FullName passt.
 $rootPath = $rootResolved.ProviderPath
 
-$outResolved = Resolve-PathSafe -Path $OutputPath
+$effectiveOutputPath = $OutputPath
+if (-not $PSBoundParameters.ContainsKey('OutputPath') -or [string]::IsNullOrWhiteSpace($OutputPath)) {
+    $scriptDir = $PSScriptRoot
+    if ([string]::IsNullOrWhiteSpace($scriptDir) -and $PSCommandPath) {
+        $scriptDir = Split-Path -Parent $PSCommandPath
+    }
+    if ([string]::IsNullOrWhiteSpace($scriptDir)) {
+        $scriptDir = (Get-Location).Path
+    }
+    $effectiveOutputPath = Join-Path -Path $scriptDir -ChildPath 'HostReachabilityReport.html'
+}
+$outResolved = Resolve-PathSafe -Path $effectiveOutputPath
 $outDir = [System.IO.Path]::GetDirectoryName($outResolved)
 if ([string]::IsNullOrEmpty($outDir)) {
     $outDir = (Get-Location).Path
