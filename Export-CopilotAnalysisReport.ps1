@@ -47,7 +47,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:ScriptExtensions = @('.ps1', '.psm1', '.bat', '.cmd', '.vbs', '.kix')
 $script:CheckpointVersion = 1
-$rootTrimmed = ''
+$script:RootTrimmed = ''
 
 function Get-CategoryPatterns {
     $opts = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
@@ -118,9 +118,9 @@ function Get-GpoRecommendation {
 function Get-RelativePath {
     param([string]$FullPath)
     if ([string]::IsNullOrWhiteSpace($FullPath)) { return '' }
-    if ([string]::IsNullOrWhiteSpace($rootTrimmed)) { return $FullPath.TrimStart('\', '/') }
-    if ($FullPath.StartsWith($rootTrimmed, [StringComparison]::OrdinalIgnoreCase)) {
-        return $FullPath.Substring($rootTrimmed.Length).TrimStart('\', '/')
+    if ([string]::IsNullOrWhiteSpace($script:RootTrimmed)) { return $FullPath.TrimStart('\', '/') }
+    if ($FullPath.StartsWith($script:RootTrimmed, [StringComparison]::OrdinalIgnoreCase)) {
+        return $FullPath.Substring($script:RootTrimmed.Length).TrimStart('\', '/')
     }
     return $FullPath
 }
@@ -263,7 +263,16 @@ function Convert-ToHashtable {
     param([object]$InputObject)
     $result = @{}
     if ($null -eq $InputObject) { return $result }
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        foreach ($k in $InputObject.Keys) {
+            $result[[string]$k] = [string]$InputObject[$k]
+        }
+        return $result
+    }
     foreach ($p in $InputObject.PSObject.Properties) {
+        if ($p.Name -in @('Keys', 'Values', 'Count', 'IsReadOnly', 'IsFixedSize', 'SyncRoot', 'IsSynchronized')) {
+            continue
+        }
         $result[$p.Name] = [string]$p.Value
     }
     return $result
@@ -287,18 +296,113 @@ function Get-SafeKey {
     return $safe
 }
 
+function New-CentralCopilotPromptMarkdown {
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.AppendLine("# Zentraler Copilot-Prompt für Legacy-Logon-Skripte")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Nutze diese Analyseanweisung **unverändert** für alle zugehörigen Copilot-Reports, damit Ergebnisse vergleichbar bleiben.")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("## Ziel")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Analysiere die bereitgestellten Skripte, um eine belastbare Entscheidungsgrundlage für die Ablösung veralteter Logon-Skript-Lösungen zu erstellen.")
+    [void]$sb.AppendLine("Migrationsstrategie: zuerst GPO-first, danach Intune-native. Keine Bastellösungen, keine Rücksicht auf absolute Legacy-Sonderfälle.")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("## Arbeitsauftrag")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("1. **Funktionsanalyse je Skript**")
+    [void]$sb.AppendLine("   - Was macht das Skript tatsächlich (technisch/fachlich)?")
+    [void]$sb.AppendLine("   - Welche Trigger, Inputs, Abhängigkeiten, Seiteneffekte und Zielsysteme gibt es?")
+    [void]$sb.AppendLine("2. **Nutzwert und Relevanz**")
+    [void]$sb.AppendLine("   - Ist das Skript heute noch notwendig, redundant, veraltet oder verwaist?")
+    [void]$sb.AppendLine("   - Gibt es Überschneidungen mit anderen Skripten?")
+    [void]$sb.AppendLine("3. **Risiko- und Qualitätsbewertung**")
+    [void]$sb.AppendLine("   - Sicherheitsrisiken, Stabilitätsrisiken, Wartbarkeit, Nachvollziehbarkeit.")
+    [void]$sb.AppendLine("   - Für nicht lesbare Dateien: Bewertung auf Basis Dateiname, Dateityp, Hash, Kontext und typischer Einsatzmuster.")
+    [void]$sb.AppendLine("4. **Modernisierungsoptionen ohne Legacy-Kompromisse**")
+    [void]$sb.AppendLine("   - Kurzfristig: sauberer Ersatz mit GPO-Mechanismen.")
+    [void]$sb.AppendLine("   - Mittelfristig: Intune-native Zielarchitektur.")
+    [void]$sb.AppendLine("   - Nenne explizit, was ersatzlos entfallen sollte.")
+    [void]$sb.AppendLine("5. **Entscheidungsvorlage**")
+    [void]$sb.AppendLine("   - Liefere konkrete Priorisierung mit Aufwand, Risiko, Business-Impact und empfohlener Reihenfolge.")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("## Ausgabeformat (verbindlich)")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("### A) Strukturierte Tabelle je Skript")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("| Skript | Zweck heute | Status (Behalten/Ersetzen/Entfernen) | Risiko | GPO-Alternative (kurzfristig) | Intune-Alternative (zielbild) | Aufwand (S/M/L) | Priorität (1-3) |")
+    [void]$sb.AppendLine("|--------|-------------|--------------------------------------|--------|-------------------------------|-------------------------------|-----------------|-----------------|")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("### B) Strukturierte Kerndaten (JSON-ähnlich)")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine('```json')
+    [void]$sb.AppendLine('{')
+    [void]$sb.AppendLine('  "scripts": [')
+    [void]$sb.AppendLine('    {')
+    [void]$sb.AppendLine('      "name": "example.ps1",')
+    [void]$sb.AppendLine('      "currentPurpose": "...",')
+    [void]$sb.AppendLine('      "decision": "replace",')
+    [void]$sb.AppendLine('      "riskLevel": "high",')
+    [void]$sb.AppendLine('      "gpoTarget": "...",')
+    [void]$sb.AppendLine('      "intuneTarget": "...",')
+    [void]$sb.AppendLine('      "effort": "M",')
+    [void]$sb.AppendLine('      "priority": 1,')
+    [void]$sb.AppendLine('      "notes": "..."')
+    [void]$sb.AppendLine('    }')
+    [void]$sb.AppendLine('  ],')
+    [void]$sb.AppendLine('  "programLevelRecommendations": [')
+    [void]$sb.AppendLine('    "..."')
+    [void]$sb.AppendLine('  ]')
+    [void]$sb.AppendLine('}')
+    [void]$sb.AppendLine('```')
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("### C) Management Summary")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("- Wichtigste Risiken (Top 5)")
+    [void]$sb.AppendLine("- Quick Wins (sofort umsetzbar)")
+    [void]$sb.AppendLine("- Zielbild in 3 Migrationswellen: Stabilisierung (GPO) -> Konsolidierung -> Intune-native Endstate")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("## Bewertungsprinzipien")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("- Bevorzuge Standards und supportbare Plattform-Features.")
+    [void]$sb.AppendLine("- Keine temporären Bastellösungen als Dauerlösung empfehlen.")
+    [void]$sb.AppendLine("- Legacy-only Sonderfälle dürfen kein Design-Treiber sein.")
+    [void]$sb.AppendLine("- Unsicherheiten explizit markieren und Verifikationsschritte nennen.")
+    return $sb.ToString()
+}
+
+function Initialize-CentralPromptFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PromptPath
+    )
+    if (Test-Path -LiteralPath $PromptPath) {
+        Write-Host "Zentrale Prompt-Datei vorhanden, wird nicht überschrieben: $PromptPath" -ForegroundColor Yellow
+        return $false
+    }
+    $content = New-CentralCopilotPromptMarkdown
+    $content | Set-Content -LiteralPath $PromptPath -Encoding UTF8
+    Write-Host "Zentrale Prompt-Datei geschrieben: $PromptPath" -ForegroundColor Green
+    return $true
+}
+
 function New-TopFolderReportMarkdown {
     param(
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
         [object[]]$Rows,
         [Parameter(Mandatory = $true)]
-        [string]$TopFolder
+        [string]$TopFolder,
+        [Parameter(Mandatory = $true)]
+        [string]$PromptLink
     )
     $sb = [System.Text.StringBuilder]::new()
     [void]$sb.AppendLine("# Skript-Analyse für Microsoft 365 Copilot")
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine("Top-Ordner: **$TopFolder**")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("## Copilot-Analyseanweisung")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Verwende den zentralen Prompt für eine standardisierte Bewertung: [$PromptLink]($PromptLink)")
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine("| Datei | Typ | Kategorie | Nutzung | Risiko | SHA256 | Abhängigkeiten | GPO-Empfehlung |")
     [void]$sb.AppendLine("|-------|-----|-----------|---------|--------|--------|----------------|----------------|")
@@ -352,12 +456,18 @@ function New-IndexMarkdown {
         [AllowEmptyCollection()]
         [object[]]$Rows,
         [Parameter(Mandatory = $true)]
-        [hashtable]$PartFiles
+        [hashtable]$PartFiles,
+        [Parameter(Mandatory = $true)]
+        [string]$PromptLink
     )
     $sb = [System.Text.StringBuilder]::new()
     [void]$sb.AppendLine("# Skript-Analyse für Microsoft 365 Copilot")
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine('Dieser Index enthält die Zusammenfassung und verlinkt auf Teilreports pro Top-Ordner.')
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("## Copilot-Analyseanweisung")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Nutze für alle Auswertungen denselben zentralen Prompt: [$PromptLink]($PromptLink)")
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine("## Teilreports")
     [void]$sb.AppendLine("")
@@ -388,7 +498,7 @@ function New-IndexMarkdown {
 # Pfade auflösen
 $rootResolved = Resolve-Path -Path $ScriptsPath -ErrorAction Stop
 $rootPath = $rootResolved.ProviderPath
-$rootTrimmed = $rootPath.TrimEnd('\', '/')
+$script:RootTrimmed = $rootPath.TrimEnd('\', '/')
 
 $outResolved = $OutputPath
 if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
@@ -404,6 +514,8 @@ if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path -LiteralPath $out
 
 $baseName = [System.IO.Path]::GetFileNameWithoutExtension($outResolved)
 if ([string]::IsNullOrWhiteSpace($baseName)) { $baseName = 'CopilotScriptAnalysis' }
+$promptFileName = 'Copilot-AnalysisPrompt.md'
+$promptResolved = Join-Path -Path $outDir -ChildPath $promptFileName
 $checkpointResolved = $CheckpointPath
 if ([string]::IsNullOrWhiteSpace($checkpointResolved)) {
     $checkpointResolved = Join-Path -Path (Get-Location) -ChildPath ("{0}.checkpoint.json" -f $baseName)
@@ -414,6 +526,8 @@ elseif (-not [System.IO.Path]::IsPathRooted($checkpointResolved)) {
 try {
     $checkpointResolved = [System.IO.Path]::GetFullPath($checkpointResolved)
 } catch {}
+
+[void](Initialize-CentralPromptFile -PromptPath $promptResolved)
 
 # Analyse-Hilfsdaten laden (Nutzung, Risiko, Abhängigkeiten)
 $inventory = @()
@@ -613,7 +727,7 @@ if (-not $state.Phases.PartsWritten) {
         $safe = Get-SafeKey -Value $top
         $partFileName = "{0}-{1}.md" -f $baseName, $safe
         $partPath = Join-Path -Path $outDir -ChildPath $partFileName
-        $partContent = New-TopFolderReportMarkdown -Rows @($g.Group) -TopFolder $top
+        $partContent = New-TopFolderReportMarkdown -Rows @($g.Group) -TopFolder $top -PromptLink $promptFileName
         $partContent | Set-Content -LiteralPath $partPath -Encoding UTF8
         $partFiles[$top] = $partFileName
         [void]$writtenSet.Add($top)
@@ -629,7 +743,7 @@ if (-not $state.Phases.PartsWritten) {
 }
 
 # Index schreiben
-$index = New-IndexMarkdown -Rows @($rows) -PartFiles (Convert-ToHashtable -InputObject $state.PartFiles)
+$index = New-IndexMarkdown -Rows @($rows) -PartFiles (Convert-ToHashtable -InputObject $state.PartFiles) -PromptLink $promptFileName
 $index | Set-Content -LiteralPath $outResolved -Encoding UTF8
 $state.Phases.IndexWritten = $true
 Write-Checkpoint -State $state -CheckpointFile $checkpointResolved

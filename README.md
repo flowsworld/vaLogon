@@ -109,9 +109,13 @@ Der Fokus liegt auf **Security**, **Abhängigkeiten**, **Nutzung**, **Duplikaten
 
 - `Export-CopilotAnalysisReport.ps1`  
   Erzeugt einen **Markdown-Report** zur Auswertung mit **Microsoft 365 Copilot** (Word, Teams):
-  - Pro Skript: relativer Pfad, Typ, Kategorie, Nutzung/Kritikalität, Abhängigkeiten, GPO-Migrationsempfehlung.
+  - Pro Skript: **Dateiname** (kein Dateipfad), Typ, Kategorie, Nutzung/Kritikalität, Abhängigkeiten, SHA256 und GPO-Migrationsempfehlung.
+  - Für lesbare Dateien wird der **echte Dateiinhalt** in den Report aufgenommen; bei nicht lesbaren/binären Dateien werden Metadaten und Recherchehinweise für Copilot ausgegeben.
+  - Ausgabe wird aufgeteilt in **Index-Datei + Teilreports pro Top-Ordner**.
+  - Erzeugt zusätzlich eine zentrale Prompt-Datei **`Copilot-AnalysisPrompt.md`** (nur wenn nicht vorhanden), auf die aus allen Reports verwiesen wird.
+  - Unterstützt **Resume/Checkpoint** für unterbrochene Läufe.
   - Mit `-AnalysisResultsPath` (Pfad zu AnalysisResults): Nutzung, Sicherheitsrisiken und Dependency-Graph aus `analysis_results.json`; ohne: nur Inventar und Kategorien aus Dateiinhalt.
-  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\CopilotScriptAnalysis.md`), `-AnalysisResultsPath` (optional).
+  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\CopilotScriptAnalysis.md`), `-AnalysisResultsPath` (optional), `-Resume` (optional), `-CheckpointPath` (optional).
 
 - `Export-GpoMigrationScripts.ps1`  
   Erzeugt **PowerShell-Skripte** zur GPO-Migration (zum manuellen Prüfen und Ausführen):
@@ -224,9 +228,21 @@ pwsh.exe -File .\Export-CopilotAnalysisReport.ps1 `
     -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
 ```
 
-Optional: `-OutputPath '.\CopilotScriptAnalysis.md'`, `-AnalysisResultsPath '.\AnalysisResults'` (wenn die Hauptanalyse bereits gelaufen ist).
+Optional: `-OutputPath '.\CopilotScriptAnalysis.md'`, `-AnalysisResultsPath '.\AnalysisResults'` (wenn die Hauptanalyse bereits gelaufen ist), `-Resume`, `-CheckpointPath`.
 
-Erzeugt eine **Markdown-Datei** mit allen Skripten inkl. Kategorie, Nutzung/Kritikalität, Abhängigkeiten und GPO-Migrationsempfehlung. Die Datei kann in **Word** oder **Teams** geöffnet und mit **Microsoft 365 Copilot** ausgewertet werden (z. B. „Analysiere diese Skripte auf Kritikalität“ oder „Welche GPO-Einstellungen ersetzen diese Logon-Skripte?“). Keine KI-APIs im Tool – die Analyse durch Copilot erfolgt manuell durch den Nutzer. Mit `-AnalysisResultsPath` werden Nutzung, Sicherheitsrisiken und Dependency-Graph aus `json/analysis_results.json` übernommen; ohne diesen Parameter nur Inventar und Kategorien.
+Erzeugt:
+- eine **Index-Markdown-Datei** (am `-OutputPath`) mit Zusammenfassung und Links,
+- **Teilreports pro Top-Ordner** (`<OutputBase>-<TopFolder>.md`),
+- eine zentrale Prompt-Datei `Copilot-AnalysisPrompt.md` (einmalig, create-if-missing).
+
+In den Teilreports steht pro Skript der tatsächliche Inhalt (wenn lesbar). Nicht lesbare/binäre Dateien werden über Dateiname/Hash/Metadaten mit Copilot-Recherchehinweis abgedeckt.
+
+Keine KI-APIs im Tool – die Analyse durch Copilot erfolgt manuell durch den Nutzer. Mit `-AnalysisResultsPath` werden Nutzung, Sicherheitsrisiken und Dependency-Graph aus `json/analysis_results.json` übernommen; ohne diesen Parameter nur Inventar und Kategorien.
+
+Resume/Checkpoint:
+- Standard-Checkpoint: `<OutputBase>.checkpoint.json` im aktuellen Working Directory
+- alternativ über `-CheckpointPath` explizit setzbar
+- bei erfolgreichem Lauf wird der Checkpoint automatisch entfernt
 
 #### GPO-Migrations-Skripte
 
