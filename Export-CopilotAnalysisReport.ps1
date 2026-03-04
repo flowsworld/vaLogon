@@ -35,14 +35,19 @@ param(
 
     [string]$OutputPath = ".\CopilotScriptAnalysis.md",
 
-    [string]$AnalysisResultsPath = ''
+    [string]$AnalysisResultsPath = '',
+
+    [switch]$Resume,
+
+    [string]$CheckpointPath = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:ScriptExtensions = @('.ps1', '.psm1', '.bat', '.cmd', '.vbs', '.kix')
-$rootTrimmed = $ScriptsPath.TrimEnd('\', '/')
+$script:CheckpointVersion = 1
+$rootTrimmed = ''
 
 function Get-CategoryPatterns {
     $opts = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
@@ -194,9 +199,224 @@ function Get-ReadableFileContent {
     }
 }
 
-# Skript-Liste ermitteln
+function Read-Checkpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CheckpointFile
+    )
+    if (-not (Test-Path -LiteralPath $CheckpointFile)) { return $null }
+    try {
+        $json = Get-Content -LiteralPath $CheckpointFile -Raw -ErrorAction Stop
+        $data = $json | ConvertFrom-Json -ErrorAction Stop
+        if (-not $data.Version -or -not $data.ScriptsPath -or -not $data.OutputPath) { return $null }
+        return $data
+    }
+    catch {
+        Write-Warning "Fehler beim Lesen des Checkpoints: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Write-Checkpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State,
+        [Parameter(Mandatory = $true)]
+        [string]$CheckpointFile
+    )
+    try {
+        $State | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $CheckpointFile -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Fehler beim Schreiben des Checkpoints: $($_.Exception.Message)"
+    }
+}
+
+function New-CopilotReportState {
+    param(
+        [string]$ScriptsPathValue,
+        [string]$OutputPathValue
+    )
+    return [ordered]@{
+        Version        = $script:CheckpointVersion
+        ScriptsPath    = $ScriptsPathValue
+        OutputPath     = $OutputPathValue
+        TimestampUtc   = (Get-Date).ToUniversalTime()
+        Inventory      = @()
+        Rows           = @()
+        ProcessedPaths = @()
+        WrittenTopFolders = @()
+        PartFiles      = @{}
+        Phases         = @{
+            InventoryCompleted = $false
+            AnalysisCompleted  = $false
+            PartsWritten       = $false
+            IndexWritten       = $false
+        }
+        Errors         = @()
+    }
+}
+
+function Convert-ToHashtable {
+    param([object]$InputObject)
+    $result = @{}
+    if ($null -eq $InputObject) { return $result }
+    foreach ($p in $InputObject.PSObject.Properties) {
+        $result[$p.Name] = [string]$p.Value
+    }
+    return $result
+}
+
+function Get-TopFolderFromFullPath {
+    param([string]$FullPath)
+    $rel = Get-RelativePath -FullPath $FullPath
+    if ([string]::IsNullOrWhiteSpace($rel)) { return '(Root)' }
+    if ($rel -eq $FullPath) { return '(Extern)' }
+    if ($rel -notmatch '[\\/]') { return '(Root)' }
+    $seg = ($rel -split '[\\/]')[0]
+    if ([string]::IsNullOrWhiteSpace($seg)) { return '(Root)' }
+    return $seg
+}
+
+function Get-SafeKey {
+    param([string]$Value)
+    $safe = $Value -replace '[^A-Za-z0-9_-]', '_'
+    if ([string]::IsNullOrWhiteSpace($safe)) { return 'ROOT' }
+    return $safe
+}
+
+function New-TopFolderReportMarkdown {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Rows,
+        [Parameter(Mandatory = $true)]
+        [string]$TopFolder
+    )
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.AppendLine("# Skript-Analyse für Microsoft 365 Copilot")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Top-Ordner: **$TopFolder**")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("| Datei | Typ | Kategorie | Nutzung | Risiko | SHA256 | Abhängigkeiten | GPO-Empfehlung |")
+    [void]$sb.AppendLine("|-------|-----|-----------|---------|--------|--------|----------------|----------------|")
+    foreach ($r in ($Rows | Sort-Object -Property FileName)) {
+        $name = [string]$r.FileName -replace '\|', '\|' -replace '\r?\n', ' '
+        $deps = [string]$r.Dependencies -replace '\|', '\|' -replace '\r?\n', ' '
+        $gpo = [string]$r.GpoRecommendation -replace '\|', '\|' -replace '\r?\n', ' '
+        $hashCol = if ($r.Hash) { $r.Hash } else { '—' }
+        [void]$sb.AppendLine("| $name | $($r.Type) | $($r.Category) | $($r.Usage) | $($r.Risk) | $hashCol | $deps | $gpo |")
+    }
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("## Dateiinhalte für Copilot")
+    [void]$sb.AppendLine("")
+    foreach ($r in ($Rows | Sort-Object -Property FileName)) {
+        [void]$sb.AppendLine("### $($r.FileName)")
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("- Typ: $($r.Type)")
+        [void]$sb.AppendLine("- Kategorie: $($r.Category)")
+        [void]$sb.AppendLine("- Nutzung: $($r.Usage)")
+        [void]$sb.AppendLine("- Risiko: $($r.Risk)")
+        [void]$sb.AppendLine("- SHA256: $(if ($r.Hash) { $r.Hash } else { '—' })")
+        [void]$sb.AppendLine("- Abhängigkeiten: $($r.Dependencies)")
+        [void]$sb.AppendLine("")
+        if ([bool]$r.IsReadable) {
+            [void]$sb.AppendLine('```text')
+            [void]$sb.AppendLine([string]$r.Content)
+            [void]$sb.AppendLine('```')
+        }
+        else {
+            [void]$sb.AppendLine("> Dateiinhalt nicht direkt lesbar.")
+            if ($r.ReadError) {
+                [void]$sb.AppendLine("> Grund: $($r.ReadError)")
+            }
+            [void]$sb.AppendLine("> Copilot-Recherchehinweis:")
+            [void]$sb.AppendLine("> Prüfe Dateiname, Dateityp, SHA256-Hash und bekannte Indikatoren (Signatur/Produktname/typische Nutzung), um Zweck und Risiko einzuordnen.")
+            [void]$sb.AppendLine("")
+            [void]$sb.AppendLine('```text')
+            [void]$sb.AppendLine("Dateiname: $($r.FileName)")
+            [void]$sb.AppendLine("Dateityp: $($r.Type)")
+            [void]$sb.AppendLine("SHA256: $(if ($r.Hash) { $r.Hash } else { '—' })")
+            [void]$sb.AppendLine('```')
+        }
+        [void]$sb.AppendLine("")
+    }
+    return $sb.ToString()
+}
+
+function New-IndexMarkdown {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Rows,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$PartFiles
+    )
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.AppendLine("# Skript-Analyse für Microsoft 365 Copilot")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine('Dieser Index enthält die Zusammenfassung und verlinkt auf Teilreports pro Top-Ordner.')
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("## Teilreports")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("| Top-Ordner | Dateien | Report |")
+    [void]$sb.AppendLine("|------------|---------|--------|")
+    foreach ($top in ($PartFiles.Keys | Sort-Object)) {
+        $count = (@($Rows | Where-Object { [string]$_.TopFolder -eq $top })).Count
+        $file = [string]$PartFiles[$top]
+        [void]$sb.AppendLine("| $top | $count | [$file]($file) |")
+    }
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("## Zusammenfassung")
+    [void]$sb.AppendLine("")
+    $byCat = $Rows | Group-Object -Property Category | Sort-Object -Property Count -Descending
+    foreach ($g in $byCat) {
+        [void]$sb.AppendLine("- **$($g.Name)**: $($g.Count) Datei(en)")
+    }
+    $activeCount = ($Rows | Where-Object { $_.Usage -eq 'Aktiv verwendet' } | Measure-Object).Count
+    $orphanCount = ($Rows | Where-Object { $_.Usage -eq 'Verwaist' } | Measure-Object).Count
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("- GPO/AD-referenziert (aktiv): $activeCount")
+    [void]$sb.AppendLine("- Verwaist: $orphanCount")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("*Erzeugt mit Export-CopilotAnalysisReport.ps1. Keine KI-APIs – Analyse durch Copilot erfolgt manuell.*")
+    return $sb.ToString()
+}
+
+# Pfade auflösen
+$rootResolved = Resolve-Path -Path $ScriptsPath -ErrorAction Stop
+$rootPath = $rootResolved.ProviderPath
+$rootTrimmed = $rootPath.TrimEnd('\', '/')
+
+$outResolved = $OutputPath
+if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
+    $outResolved = Join-Path -Path (Get-Location) -ChildPath $OutputPath
+}
+try {
+    $outResolved = [System.IO.Path]::GetFullPath($outResolved)
+} catch {}
+$outDir = [System.IO.Path]::GetDirectoryName($outResolved)
+if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path -LiteralPath $outDir)) {
+    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+}
+
+$baseName = [System.IO.Path]::GetFileNameWithoutExtension($outResolved)
+if ([string]::IsNullOrWhiteSpace($baseName)) { $baseName = 'CopilotScriptAnalysis' }
+$checkpointResolved = $CheckpointPath
+if ([string]::IsNullOrWhiteSpace($checkpointResolved)) {
+    $checkpointResolved = Join-Path -Path (Get-Location) -ChildPath ("{0}.checkpoint.json" -f $baseName)
+}
+elseif (-not [System.IO.Path]::IsPathRooted($checkpointResolved)) {
+    $checkpointResolved = Join-Path -Path (Get-Location) -ChildPath $checkpointResolved
+}
+try {
+    $checkpointResolved = [System.IO.Path]::GetFullPath($checkpointResolved)
+} catch {}
+
+# Analyse-Hilfsdaten laden (Nutzung, Risiko, Abhängigkeiten)
 $inventory = @()
-$usageByPath = @{}
 $securityMaxRiskByPath = @{}
 $edges = @()
 
@@ -206,23 +426,21 @@ if (-not [string]::IsNullOrWhiteSpace($AnalysisResultsPath)) {
     if (Test-Path -LiteralPath $analysisFile) {
         try {
             $json = Get-Content -LiteralPath $analysisFile -Raw -Encoding UTF8
-            $state = $json | ConvertFrom-Json
-            $inv = @($state.Inventory ?? @()) | Where-Object {
+            $analysisState = $json | ConvertFrom-Json
+            $inv = @($analysisState.Inventory ?? @()) | Where-Object {
                 $_.Extension -in $script:ScriptExtensions -or $_.IsScript -eq $true
             }
             foreach ($i in $inv) {
                 $fp = [string]$i.FullPath
                 $inventory += [pscustomobject]@{
-                    FullPath   = $fp
-                    Name       = $i.Name
-                    Extension  = if ($i.Extension) { $i.Extension } else { [System.IO.Path]::GetExtension($fp) }
+                    FullPath      = $fp
+                    Name          = $i.Name
+                    Extension     = if ($i.Extension) { $i.Extension } else { [System.IO.Path]::GetExtension($fp) }
                     UsageCategory = if ($i.UsageCategory) { $i.UsageCategory } else { '—' }
                     UsageSources  = if ($i.UsageSources) { $i.UsageSources } else { '' }
                 }
-                if ($i.UsageCategory) { $usageByPath[$fp] = $i.UsageCategory }
             }
-            $sec = @($state.SecurityFindings ?? @())
-            foreach ($s in $sec) {
+            foreach ($s in @($analysisState.SecurityFindings ?? @())) {
                 $fp = [string]$s.FilePath
                 if (-not $fp) { continue }
                 $risk = [string]$s.RiskLevel
@@ -230,9 +448,8 @@ if (-not [string]::IsNullOrWhiteSpace($AnalysisResultsPath)) {
                     $securityMaxRiskByPath[$fp] = $risk
                 }
             }
-            $graph = $state.DependencyGraph
-            if ($graph -and $graph.Edges) {
-                $edges = @($graph.Edges)
+            if ($analysisState.DependencyGraph -and $analysisState.DependencyGraph.Edges) {
+                $edges = @($analysisState.DependencyGraph.Edges)
             }
         }
         catch {
@@ -241,134 +458,184 @@ if (-not [string]::IsNullOrWhiteSpace($AnalysisResultsPath)) {
     }
 }
 
-if ($inventory.Count -eq 0) {
-    $files = Get-ChildItem -LiteralPath $ScriptsPath -Recurse -File -ErrorAction Stop |
-        Where-Object { $_.Extension -in $script:ScriptExtensions }
-    foreach ($f in $files) {
-        $inventory += [pscustomobject]@{
-            FullPath       = $f.FullName
-            Name           = $f.Name
-            Extension      = $f.Extension
-            UsageCategory  = '—'
-            UsageSources   = ''
+# Resume-Status initialisieren/laden
+$state = $null
+$checkpoint = $null
+if ($Resume) {
+    $checkpoint = Read-Checkpoint -CheckpointFile $checkpointResolved
+    if ($checkpoint -and $checkpoint.Version -eq $script:CheckpointVersion -and $checkpoint.ScriptsPath -eq $rootPath -and $checkpoint.OutputPath -eq $outResolved) {
+        Write-Host "Checkpoint gefunden, setze fort: $checkpointResolved" -ForegroundColor Yellow
+        $partFiles = Convert-ToHashtable -InputObject $checkpoint.PartFiles
+        $state = [ordered]@{
+            Version           = $script:CheckpointVersion
+            ScriptsPath       = [string]$checkpoint.ScriptsPath
+            OutputPath        = [string]$checkpoint.OutputPath
+            TimestampUtc      = $checkpoint.TimestampUtc
+            Inventory         = @($checkpoint.Inventory)
+            Rows              = @($checkpoint.Rows)
+            ProcessedPaths    = @($checkpoint.ProcessedPaths)
+            WrittenTopFolders = @($checkpoint.WrittenTopFolders)
+            PartFiles         = $partFiles
+            Phases            = $checkpoint.Phases
+            Errors            = @($checkpoint.Errors)
         }
     }
+    elseif ($checkpoint) {
+        Write-Warning "Checkpoint ignoriert (Version, ScriptsPath oder OutputPath passt nicht)."
+    }
+}
+if (-not $state) {
+    $state = New-CopilotReportState -ScriptsPathValue $rootPath -OutputPathValue $outResolved
+    Write-Host "Kein passender Checkpoint gefunden. Starte neuen Lauf." -ForegroundColor Gray
+}
+
+# Inventarphase
+if (-not $state.Phases.InventoryCompleted -or @($state.Inventory).Count -eq 0) {
+    if ($inventory.Count -eq 0) {
+        $files = Get-ChildItem -LiteralPath $rootPath -Recurse -File -ErrorAction Stop |
+            Where-Object { $_.Extension -in $script:ScriptExtensions }
+        foreach ($f in $files) {
+            $inventory += [pscustomobject]@{
+                FullPath      = $f.FullName
+                Name          = $f.Name
+                Extension     = $f.Extension
+                UsageCategory = '—'
+                UsageSources  = ''
+            }
+        }
+    }
+    $state.Inventory = @($inventory)
+    $state.Phases.InventoryCompleted = $true
+    Write-Checkpoint -State $state -CheckpointFile $checkpointResolved
+}
+else {
+    $inventory = @($state.Inventory)
 }
 
 $patterns = Get-CategoryPatterns
 $rows = [System.Collections.ArrayList]::new()
-
-foreach ($inv in $inventory) {
-    $fullPath = [string]$inv.FullPath
-    $displayName = Convert-ToDisplayName -FullPath $fullPath
-    $ext = $inv.Extension
-    $usage = $inv.UsageCategory
-    $risk = $securityMaxRiskByPath[$fullPath]
-    if (-not $risk) { $risk = '—' }
-    $hash = Get-SafeFileHash -Path $fullPath
-
-    $contentInfo = Get-ReadableFileContent -Path $fullPath
-    $content = if ($contentInfo.IsReadable) { [string]$contentInfo.Content } else { '' }
-    $category = Get-FileCategoryResult -Content $content -CategoryPatterns $patterns
-    $gpoRec = Get-GpoRecommendation -Category $category
-
-    $inEdges = @($edges | Where-Object { [string]$_.TargetPath -eq $fullPath })
-    $outEdges = @($edges | Where-Object { [string]$_.SourcePath -eq $fullPath })
-    $callers = ($inEdges | ForEach-Object { Convert-ToDisplayName -FullPath ([string]$_.SourcePath) } | Where-Object { $_ }) -join '; '
-    $callees = ($outEdges | ForEach-Object { Convert-ToDisplayName -FullPath ([string]$_.TargetPath) } | Where-Object { $_ }) -join '; '
-    if (-not $callers) { $callers = '—' }
-    if (-not $callees) { $callees = '—' }
-    $deps = "Aufrufer: $callers | Aufgerufen: $callees"
-
-    [void]$rows.Add([pscustomobject]@{
-        FileName       = $displayName
-        Type           = $ext
-        Category       = $category
-        Usage          = $usage
-        Risk           = $risk
-        Hash           = $hash
-        Dependencies   = $deps
-        GpoRecommendation = $gpoRec
-        IsReadable     = $contentInfo.IsReadable
-        Content        = $content
-        ReadError      = $contentInfo.Reason
-    })
+foreach ($r in @($state.Rows)) { [void]$rows.Add($r) }
+$processed = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+foreach ($p in @($state.ProcessedPaths)) {
+    if ($p) { [void]$processed.Add([string]$p) }
+}
+foreach ($r in @($rows)) {
+    if ($r.FullPath) { [void]$processed.Add([string]$r.FullPath) }
 }
 
-# Markdown ausgeben
-$sb = [System.Text.StringBuilder]::new()
-[void]$sb.AppendLine("# Skript-Analyse für Microsoft 365 Copilot")
-[void]$sb.AppendLine("")
-[void]$sb.AppendLine('Dieser Report listet alle erfassten Logon-/Skriptdateien mit Kategorie, Nutzung, Kritikalität, Abhängigkeiten, Hash und empfohlener GPO-Migration. Der tatsächliche Dateiinhalt wird pro Datei eingebettet (sofern lesbar). Für nicht lesbare Dateien werden Recherchehinweise aus Metadaten bereitgestellt. Zur Auswertung in Word oder Teams öffnen und mit Copilot z.B. fragen: "Analysiere diese Skripte auf Kritikalität" oder "Welche GPO-Einstellungen ersetzen diese Logon-Skripte?".')
-[void]$sb.AppendLine("")
-[void]$sb.AppendLine("| Datei | Typ | Kategorie | Nutzung | Risiko | SHA256 | Abhängigkeiten | GPO-Empfehlung |")
-[void]$sb.AppendLine("|-------|-----|-----------|---------|--------|--------|----------------|----------------|")
+# Analysephase
+if (-not $state.Phases.AnalysisCompleted) {
+    $totalInv = [Math]::Max(1, @($inventory).Count)
+    $idx = 0
+    foreach ($inv in $inventory) {
+        $idx++
+        $fullPath = [string]$inv.FullPath
+        if ([string]::IsNullOrWhiteSpace($fullPath)) { continue }
+        if ($processed.Contains($fullPath)) { continue }
+        Write-Progress -Activity 'Erstelle Copilot-Analyse' -Status ([System.IO.Path]::GetFileName($fullPath)) -PercentComplete ([math]::Min(100, [int](100 * $idx / $totalInv)))
 
-foreach ($r in $rows) {
-    $name = $r.FileName -replace '\|', '\|' -replace '\r?\n', ' '
-    $deps = $r.Dependencies -replace '\|', '\|' -replace '\r?\n', ' '
-    $gpo = $r.GpoRecommendation -replace '\|', '\|' -replace '\r?\n', ' '
-    $hashCol = if ($r.Hash) { $r.Hash } else { '—' }
-    [void]$sb.AppendLine("| $name | $($r.Type) | $($r.Category) | $($r.Usage) | $($r.Risk) | $hashCol | $deps | $gpo |")
-}
+        $displayName = Convert-ToDisplayName -FullPath $fullPath
+        $ext = if ($inv.Extension) { [string]$inv.Extension } else { [System.IO.Path]::GetExtension($fullPath) }
+        $usage = if ($inv.UsageCategory) { [string]$inv.UsageCategory } else { '—' }
+        $risk = $securityMaxRiskByPath[$fullPath]
+        if (-not $risk) { $risk = '—' }
+        $hash = ''
+        $content = ''
+        $isReadable = $false
+        $readError = ''
 
-[void]$sb.AppendLine("")
-[void]$sb.AppendLine("## Dateiinhalte für Copilot")
-[void]$sb.AppendLine("")
-foreach ($r in ($rows | Sort-Object -Property FileName)) {
-    [void]$sb.AppendLine("### $($r.FileName)")
-    [void]$sb.AppendLine("")
-    [void]$sb.AppendLine("- Typ: $($r.Type)")
-    [void]$sb.AppendLine("- Kategorie: $($r.Category)")
-    [void]$sb.AppendLine("- Nutzung: $($r.Usage)")
-    [void]$sb.AppendLine("- Risiko: $($r.Risk)")
-    [void]$sb.AppendLine("- SHA256: $(if ($r.Hash) { $r.Hash } else { '—' })")
-    [void]$sb.AppendLine("- Abhängigkeiten: $($r.Dependencies)")
-    [void]$sb.AppendLine("")
-    if ($r.IsReadable) {
-        [void]$sb.AppendLine('```text')
-        [void]$sb.AppendLine($r.Content)
-        [void]$sb.AppendLine('```')
-    }
-    else {
-        [void]$sb.AppendLine("> Dateiinhalt nicht direkt lesbar.")
-        if ($r.ReadError) {
-            [void]$sb.AppendLine("> Grund: $($r.ReadError)")
+        if (Test-Path -LiteralPath $fullPath) {
+            $hash = Get-SafeFileHash -Path $fullPath
+            $contentInfo = Get-ReadableFileContent -Path $fullPath
+            $content = if ($contentInfo.IsReadable) { [string]$contentInfo.Content } else { '' }
+            $isReadable = [bool]$contentInfo.IsReadable
+            $readError = [string]$contentInfo.Reason
         }
-        [void]$sb.AppendLine("> Copilot-Recherchehinweis:")
-        [void]$sb.AppendLine("> Prüfe Dateiname, Dateityp, SHA256-Hash und bekannte Indikatoren (Signatur/Produktname/typische Nutzung), um Zweck und Risiko einzuordnen.")
-        [void]$sb.AppendLine("")
-        [void]$sb.AppendLine('```text')
-        [void]$sb.AppendLine("Dateiname: $($r.FileName)")
-        [void]$sb.AppendLine("Dateityp: $($r.Type)")
-        [void]$sb.AppendLine("SHA256: $(if ($r.Hash) { $r.Hash } else { '—' })")
-        [void]$sb.AppendLine('```')
+        else {
+            $readError = 'Datei nicht gefunden'
+        }
+
+        $category = Get-FileCategoryResult -Content $content -CategoryPatterns $patterns
+        $gpoRec = Get-GpoRecommendation -Category $category
+
+        $inEdges = @($edges | Where-Object { [string]$_.TargetPath -eq $fullPath })
+        $outEdges = @($edges | Where-Object { [string]$_.SourcePath -eq $fullPath })
+        $callers = ($inEdges | ForEach-Object { Convert-ToDisplayName -FullPath ([string]$_.SourcePath) } | Where-Object { $_ }) -join '; '
+        $callees = ($outEdges | ForEach-Object { Convert-ToDisplayName -FullPath ([string]$_.TargetPath) } | Where-Object { $_ }) -join '; '
+        if (-not $callers) { $callers = '—' }
+        if (-not $callees) { $callees = '—' }
+        $deps = "Aufrufer: $callers | Aufgerufen: $callees"
+
+        [void]$rows.Add([pscustomobject]@{
+            FullPath           = $fullPath
+            TopFolder          = Get-TopFolderFromFullPath -FullPath $fullPath
+            FileName           = $displayName
+            Type               = $ext
+            Category           = $category
+            Usage              = $usage
+            Risk               = $risk
+            Hash               = $hash
+            Dependencies       = $deps
+            GpoRecommendation  = $gpoRec
+            IsReadable         = $isReadable
+            Content            = $content
+            ReadError          = $readError
+        })
+
+        [void]$processed.Add($fullPath)
+        if (($processed.Count % 20) -eq 0) {
+            $state.Rows = @($rows)
+            $state.ProcessedPaths = @($processed)
+            Write-Checkpoint -State $state -CheckpointFile $checkpointResolved
+        }
     }
-    [void]$sb.AppendLine("")
+    Write-Progress -Activity 'Erstelle Copilot-Analyse' -Completed
+    $state.Rows = @($rows)
+    $state.ProcessedPaths = @($processed)
+    $state.Phases.AnalysisCompleted = $true
+    Write-Checkpoint -State $state -CheckpointFile $checkpointResolved
+}
+else {
+    Write-Host ("Resume: Analyse bereits vollständig ({0} Dateien)." -f @($state.Rows).Count) -ForegroundColor Yellow
+    $rows = [System.Collections.ArrayList]::new()
+    foreach ($r in @($state.Rows)) { [void]$rows.Add($r) }
 }
 
-[void]$sb.AppendLine("")
-[void]$sb.AppendLine("## Zusammenfassung")
-[void]$sb.AppendLine("")
-$byCat = $rows | Group-Object -Property Category | Sort-Object -Property Count -Descending
-foreach ($g in $byCat) {
-    [void]$sb.AppendLine("- **$($g.Name)**: $($g.Count) Datei(en)")
+# Teilreports pro Top-Ordner schreiben
+if (-not $state.Phases.PartsWritten) {
+    $writtenSet = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($w in @($state.WrittenTopFolders)) { if ($w) { [void]$writtenSet.Add([string]$w) } }
+    $partFiles = Convert-ToHashtable -InputObject $state.PartFiles
+    $grouped = @($rows | Group-Object -Property TopFolder | Sort-Object -Property Name)
+    foreach ($g in $grouped) {
+        $top = [string]$g.Name
+        if ($writtenSet.Contains($top)) { continue }
+        $safe = Get-SafeKey -Value $top
+        $partFileName = "{0}-{1}.md" -f $baseName, $safe
+        $partPath = Join-Path -Path $outDir -ChildPath $partFileName
+        $partContent = New-TopFolderReportMarkdown -Rows @($g.Group) -TopFolder $top
+        $partContent | Set-Content -LiteralPath $partPath -Encoding UTF8
+        $partFiles[$top] = $partFileName
+        [void]$writtenSet.Add($top)
+        Write-Host ("Teilreport geschrieben: {0}" -f $partFileName) -ForegroundColor Green
+        $state.PartFiles = $partFiles
+        $state.WrittenTopFolders = @($writtenSet)
+        Write-Checkpoint -State $state -CheckpointFile $checkpointResolved
+    }
+    $state.PartFiles = $partFiles
+    $state.WrittenTopFolders = @($writtenSet)
+    $state.Phases.PartsWritten = $true
+    Write-Checkpoint -State $state -CheckpointFile $checkpointResolved
 }
-$activeCount = ($rows | Where-Object { $_.Usage -eq 'Aktiv verwendet' } | Measure-Object).Count
-$orphanCount = ($rows | Where-Object { $_.Usage -eq 'Verwaist' } | Measure-Object).Count
-[void]$sb.AppendLine("")
-[void]$sb.AppendLine("- GPO/AD-referenziert (aktiv): $activeCount")
-[void]$sb.AppendLine("- Verwaist: $orphanCount")
-[void]$sb.AppendLine("")
-[void]$sb.AppendLine("*Erzeugt mit Export-CopilotAnalysisReport.ps1. Keine KI-APIs – Analyse durch Copilot erfolgt manuell.*")
 
-$outResolved = $OutputPath
-if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
-    $outResolved = Join-Path -Path (Get-Location) -ChildPath $OutputPath
+# Index schreiben
+$index = New-IndexMarkdown -Rows @($rows) -PartFiles (Convert-ToHashtable -InputObject $state.PartFiles)
+$index | Set-Content -LiteralPath $outResolved -Encoding UTF8
+$state.Phases.IndexWritten = $true
+Write-Checkpoint -State $state -CheckpointFile $checkpointResolved
+
+if (Test-Path -LiteralPath $checkpointResolved) {
+    Remove-Item -LiteralPath $checkpointResolved -Force -ErrorAction SilentlyContinue
+    Write-Host "Checkpoint gelöscht (Lauf vollständig)." -ForegroundColor Green
 }
-$outDir = [System.IO.Path]::GetDirectoryName($outResolved)
-if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path -LiteralPath $outDir)) {
-    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
-}
-$sb.ToString() | Set-Content -LiteralPath $outResolved -Encoding UTF8
-Write-Host "Copilot-Report geschrieben: $outResolved" -ForegroundColor Green
+Write-Host "Copilot-Report Index geschrieben: $outResolved" -ForegroundColor Green
