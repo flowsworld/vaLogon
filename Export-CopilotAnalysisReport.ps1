@@ -227,6 +227,10 @@ function Write-Checkpoint {
         [string]$CheckpointFile
     )
     try {
+        $checkpointDir = [System.IO.Path]::GetDirectoryName($CheckpointFile)
+        if (-not [string]::IsNullOrWhiteSpace($checkpointDir) -and -not (Test-Path -LiteralPath $checkpointDir)) {
+            New-Item -ItemType Directory -Path $checkpointDir -Force | Out-Null
+        }
         $State | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $CheckpointFile -Encoding UTF8 -ErrorAction Stop
     }
     catch {
@@ -270,9 +274,6 @@ function Convert-ToHashtable {
         return $result
     }
     foreach ($p in $InputObject.PSObject.Properties) {
-        if ($p.Name -in @('Keys', 'Values', 'Count', 'IsReadOnly', 'IsFixedSize', 'SyncRoot', 'IsSynchronized')) {
-            continue
-        }
         $result[$p.Name] = [string]$p.Value
     }
     return $result
