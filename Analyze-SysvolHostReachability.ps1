@@ -1047,6 +1047,16 @@ $rootResolved = Resolve-Path -Path $ScriptsPath -ErrorAction Stop
 $rootPath = $rootResolved.ProviderPath
 
 $outResolved = Resolve-PathSafe -Path $OutputPath
+$outDir = [System.IO.Path]::GetDirectoryName($outResolved)
+if ([string]::IsNullOrEmpty($outDir)) {
+    $outDir = (Get-Location).Path
+}
+if (-not (Test-Path $outDir)) {
+    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+}
+# Template früh bereitstellen; Daten werden später dynamisch nachgeladen.
+Export-HostReachabilityTemplate -OutputFilePath $outResolved -TopFolders @()
+
 $checkpointResolved = Get-CheckpointPath -ProvidedPath $CheckpointPath
 $artifactPaths = Get-ResumeArtifactPaths -CheckpointPathValue $checkpointResolved
 $autoResumeEnabled = -not $NoAutoResume
@@ -1349,14 +1359,6 @@ elseif (-not $SubnetScan) {
 }
 
 $subnetScanDataFinal = @($subnetScanData)
-
-$outDir = [System.IO.Path]::GetDirectoryName($outResolved)
-if ([string]::IsNullOrEmpty($outDir)) {
-    $outDir = (Get-Location).Path
-}
-if (-not (Test-Path $outDir)) {
-    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
-}
 $topFoldersForTemplate = Write-HostReachabilityDataFiles -Results $results -OutputDirectory $outDir -FilesScanned $state.FilesScannedCount -FilesPerTopFolder $state.FilesPerTopFolder -SubnetScanData $subnetScanDataFinal
 Export-HostReachabilityTemplate -OutputFilePath $outResolved -TopFolders $topFoldersForTemplate
 $state.Phases.ReportExported = $true

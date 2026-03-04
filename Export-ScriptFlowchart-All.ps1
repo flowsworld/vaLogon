@@ -2075,6 +2075,17 @@ $dropdownTopOptions
 $rootResolved = Resolve-Path -Path $ScriptsPath -ErrorAction Stop
 $rootPath = $rootResolved.ProviderPath
 
+# Ausgabe-Datei frühzeitig auflösen/anlegen und Template direkt bereitstellen.
+$outResolved = $OutputPath
+if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
+    $outResolved = Join-Path -Path (Get-Location) -ChildPath $OutputPath
+}
+$outDir = [System.IO.Path]::GetDirectoryName($outResolved)
+if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path $outDir)) {
+    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+}
+Export-ScriptLinksFlowchartTemplate -TopFolders @() -EmbeddedData @{} -EmbeddedContentData @{} -OutputFilePath $outResolved
+
 $normalizedExclude = @(Get-NormalizedExcludeFolders -Folders $ExcludeFolders)
 $normalizedInclude = @(Get-NormalizedIncludeFolders -Folders $IncludeFolders)
 if (@($normalizedExclude).Count -gt 0) {
@@ -2266,16 +2277,6 @@ if (-not [string]::IsNullOrWhiteSpace($StartPath)) {
         $visited.Contains([string]$_.SourceId) -and $visited.Contains([string]$_.TargetId)
     })
     Write-Host ("StartPath/Hops aktiv: Seed '{0}', Hops={1}, Nodes={2}, Edges={3}" -f $startNode.DisplayName, $Hops, $activeNodeList.Count, $activeEdgesFinal.Count) -ForegroundColor Yellow
-}
-
-# Ausgabe-Datei auflösen/anlegen
-$outResolved = $OutputPath
-if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
-    $outResolved = Join-Path -Path (Get-Location) -ChildPath $OutputPath
-}
-$outDir = [System.IO.Path]::GetDirectoryName($outResolved)
-if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path $outDir)) {
-    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
 
 # Top-Ordner ermitteln
