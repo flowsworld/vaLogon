@@ -88,10 +88,11 @@ Der Fokus liegt auf **Security**, **Abhängigkeiten**, **Nutzung**, **Duplikaten
   - Erstellt Knoten für alle Dateien unter `ScriptsPath` (inkl. z. B. `.exe`, `.dll`, `.lnk`, `.ini`, `.xml`, `.json`, `.txt`).
   - Erkennt Dateiverknüpfungen über Dateinamen in textbasierten Dateien und zeichnet Kanten (inkl. cross-boundary/extern).
   - Kommentarbewusste Erkennung: Verknüpfungen in Kommentaren (`rem`, `::`, `#`, `<# #>`, `'`, `;` je Dateityp) werden separat als Kommentar-Link markiert und können im Viewer ein-/ausgeblendet werden.
-  - Exportiert pro Top-Ordner eine eigene JSON-Datei (`ScriptFlowchart-All-<Top>.json`) und erzeugt eine HTML-Template-Datei (`ScriptFlowchart-All.html`), die die Daten dynamisch lädt.
-  - Funktioniert auch im `file://`-Modus: Für lokale Öffnung sind die Top-Ordner-Daten zusätzlich im HTML eingebettet.
-  - UI-Funktionen: Top-Ordner-Auswahl, Zoom (100–1000 %), Ausblenden externer/roter Verknüpfungen, Ausblenden von Verknüpfungen aus Kommentaren, dynamischer Codebereich unter dem Flowchart mit markierten Verknüpfungspunkten (gelb intern, rot extern).
-  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\ScriptFlowchart-All.html`), `-ExcludeFolders`, `-Encoding`.
+  - Exportiert pro Top-Ordner eine eigene Graph-JSON (`ScriptFlowchart-All-<Top>.json`) sowie eine separate Content-JSON (`ScriptFlowchart-All-<Top>-content.json`) und erzeugt eine HTML-Template-Datei (`ScriptFlowchart-All.html`), die beides dynamisch lädt (lazy loading für Dateiinhalt).
+  - Viewer mit Guardrails gegen übergroße Mermaid-Diagramme: Bei Erreichen von Limits erfolgt automatische Degradation (Kommentar-Links ausblenden, externe/cross-boundary ausblenden, ggf. Chunking).
+  - UI-Funktionen: Top-Ordner-Auswahl, Zoom (100–1000 %), Ausblenden externer/roter Verknüpfungen, Ausblenden von Verknüpfungen aus Kommentaren, Chunking (`Gesamtgraph` / `Pro Unterordner` / `Pro Komponente`) mit Teilgraph-Auswahl, dynamischer Codebereich unter dem Flowchart mit markierten Verknüpfungspunkten (gelb intern, rot extern).
+  - Funktioniert im HTTP-Modus optimal mit externen JSON-Dateien; für `file://` kann optional `-EmbedTopFolderData` genutzt werden.
+  - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\ScriptFlowchart-All.html`), `-ExcludeFolders`, `-IncludeFolders`, `-MaxDepth`, `-StartPath`, `-Hops`, `-EmbedTopFolderData`, `-Encoding`.
 
 - `Analyze-LoginScriptCategories.ps1`  
   Eigenständiges Skript zur **statistischen Kategorie-Analyse** von Anmeldeskripten:
@@ -191,13 +192,15 @@ pwsh.exe -File .\Export-ScriptFlowchart-All.ps1 `
     -ScriptsPath '\\contoso.local\SYSVOL\contoso.local\scripts'
 ```
 
-Optional: `-OutputPath 'D:\Reports\ScriptFlowchart-All.html'`, `-ExcludeFolders @('2217','2236/Test')`, `-Encoding`.
+Optional: `-OutputPath 'D:\Reports\ScriptFlowchart-All.html'`, `-ExcludeFolders @('2217','2236/Test')`, `-IncludeFolders @('2217','2236/Common')`, `-MaxDepth 3`, `-StartPath '2217\\logon.ps1' -Hops 2`, `-EmbedTopFolderData`, `-Encoding`.
 
 Ausgabe:
 - `ScriptFlowchart-All.html` als Viewer/Template
 - `ScriptFlowchart-All-<Top>.json` pro Top-Ordner (z. B. `...-2117.json`)
+- `ScriptFlowchart-All-<Top>-content.json` pro Top-Ordner (Dateiinhalt für den Codebereich)
 
-Die HTML bietet Top-Ordner-Auswahl, Zoom, optionales Ausblenden externer/roter Verknüpfungen, optionales Ausblenden von Verknüpfungen aus Kommentaren sowie einen dynamischen Bereich „Dateien und Inhalt“ unterhalb des Diagramms mit farblicher Markierung der Verknüpfungspunkte.
+Die HTML bietet Top-Ordner-Auswahl, Zoom, optionales Ausblenden externer/roter Verknüpfungen, optionales Ausblenden von Verknüpfungen aus Kommentaren, Chunking-Auswahl für große Graphen sowie einen dynamischen Bereich „Dateien und Inhalt“ unterhalb des Diagramms mit farblicher Markierung der Verknüpfungspunkte.  
+Bei sehr großen Top-Ordnern greift ein automatischer Guardrail/Fallback, um Mermaid-Fehler wie „Maximum text size in diagram exceeded“ zu vermeiden.
 
 #### Login-Skript Kategorien (statistische Analyse)
 

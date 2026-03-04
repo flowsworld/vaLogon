@@ -53,6 +53,17 @@ param(
 
     [string[]]$ExcludeFolders,
 
+    [string[]]$IncludeFolders,
+
+    [int]$MaxDepth = -1,
+
+    [string]$StartPath,
+
+    [ValidateRange(0, 32)]
+    [int]$Hops = 0,
+
+    [switch]$EmbedTopFolderData,
+
     [System.Text.Encoding]$Encoding = [System.Text.Encoding]::UTF8
 )
 
@@ -394,6 +405,27 @@ function Get-NormalizedExcludeFolders {
                 $p = $_.Trim()
                 $p = $p -replace '\\', '/'
                 $p = $p.Trim('/')
+                if ($p -eq '.') { $p = '' }
+                $p
+            } |
+            Where-Object { $_ } |
+            Sort-Object -Unique
+    )
+    return $normalized
+}
+
+function Get-NormalizedIncludeFolders {
+    param(
+        [string[]]$Folders
+    )
+    if (-not $Folders) { return @() }
+    $normalized = @(
+        $Folders |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object {
+                $p = $_.Trim()
+                $p = $p -replace '\\', '/'
+                $p = $p.Trim('/')
                 $p
             } |
             Where-Object { $_ } |
@@ -425,6 +457,29 @@ function Test-IsExcludedPath {
     return $false
 }
 
+function Test-IsIncludedPath {
+    param(
+        [string]$FullPath,
+        [string]$RootPath,
+        [string[]]$IncludePrefixes
+    )
+    if (-not $IncludePrefixes -or @($IncludePrefixes).Count -eq 0) { return $true }
+    $rootTrimmed = $RootPath.TrimEnd('\', '/')
+    $rel = $FullPath
+    if ($rel.StartsWith($rootTrimmed, [StringComparison]::OrdinalIgnoreCase)) {
+        $rel = $rel.Substring($rootTrimmed.Length).TrimStart('\', '/')
+    }
+    $relNorm = $rel -replace '\\', '/'
+    foreach ($p in $IncludePrefixes) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        if ($relNorm.Equals($p, [StringComparison]::OrdinalIgnoreCase) -or
+            $relNorm.StartsWith($p + '/', [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Get-RelativePath {
     param(
         [string]$FullPath,
@@ -435,6 +490,14 @@ function Get-RelativePath {
         return $FullPath.Substring($rootTrimmed.Length).TrimStart('\', '/')
     }
     return $FullPath
+}
+
+function Get-DepthFromRelativePath {
+    param([string]$RelativePath)
+    if ([string]::IsNullOrWhiteSpace($RelativePath)) { return 0 }
+    $segments = $RelativePath -split '[\\/]'
+    if ($segments.Length -le 1) { return 0 }
+    return [Math]::Max(0, $segments.Length - 1)
 }
 
 function Get-TopFolderFromRelative {
@@ -778,7 +841,10 @@ $dropdownTopOptions
   <script>
   (function() {
     var selectTop = document.getElementById('filter-topfolder');
+    var chunkModeSelect = document.getElementById('filter-chunk-mode');
+    var chunkSelect = document.getElementById('filter-chunk');
     var mermaidTarget = document.getElementById('mermaid-target');
+    var renderStatusEl = document.getElementById('render-status');
     var zoomRange = document.getElementById('zoom-range');
     var zoomOutBtn = document.getElementById('zoom-out');
     var zoomInBtn = document.getElementById('zoom-in');
@@ -1061,6 +1127,7 @@ function Export-ScriptLinksFlowchartTemplate {
         [string[]]$TopFolders,
         [Parameter(Mandatory = $true)]
         [hashtable]$EmbeddedData,
+        [hashtable]$EmbeddedContentData = @{},
         [Parameter(Mandatory = $true)]
         [string]$OutputFilePath
     )
@@ -1077,6 +1144,12 @@ function Export-ScriptLinksFlowchartTemplate {
         if (-not $json) { continue }
         $jsonEscaped = $json -replace '</', '\u003c/'
         $embeddedBlocks += "  <script type=`"application/json`" id=`"data-$key`">$jsonEscaped</script>"
+    }
+    foreach ($key in $EmbeddedContentData.Keys) {
+        $json = $EmbeddedContentData[$key]
+        if (-not $json) { continue }
+        $jsonEscaped = $json -replace '</', '\u003c/'
+        $embeddedBlocks += "  <script type=`"application/json`" id=`"content-$key`">$jsonEscaped</script>"
     }
     $embeddedJoined = $embeddedBlocks -join "`n"
 
@@ -1122,6 +1195,20 @@ function Export-ScriptLinksFlowchartTemplate {
 $dropdownTopOptions
         </select>
       </div>
+      <div class="flex items-center gap-2">
+        <label for="filter-chunk-mode" class="text-sm font-medium text-gray-700">Chunking</label>
+        <select id="filter-chunk-mode" class="rounded border border-gray-300 px-3 py-1.5 text-gray-900 focus:ring-2 focus:ring-blue-500">
+          <option value="all">Gesamtgraph</option>
+          <option value="folder">Pro Unterordner</option>
+          <option value="component">Pro Komponente</option>
+        </select>
+      </div>
+      <div class="flex items-center gap-2">
+        <label for="filter-chunk" class="text-sm font-medium text-gray-700">Teilgraph</label>
+        <select id="filter-chunk" class="rounded border border-gray-300 px-3 py-1.5 text-gray-900 focus:ring-2 focus:ring-blue-500">
+          <option value="all">Alle</option>
+        </select>
+      </div>
       <label class="flex items-center gap-2 text-sm text-gray-700">
         <input id="toggle-hide-external" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
         Externe Verknüpfungen ausblenden
@@ -1147,6 +1234,7 @@ $dropdownTopOptions
           Bitte einen Top-Ordner auswählen.
         </div>
       </div>
+      <div id="render-status" class="mt-2 text-xs text-amber-700"></div>
     </section>
 
     <section class="mb-8 bg-white rounded-xl shadow p-4">
@@ -1181,8 +1269,17 @@ $dropdownTopOptions
     var renderId = 0;
     var currentZoom = 1.0;
     var currentData = null;
+    var currentContentData = {};
+    var contentCacheByTop = {};
     var currentRenderedNodes = [];
     var currentTopVal = '';
+    var currentChunkMeta = null;
+
+    var RENDER_LIMITS = {
+      maxNodes: 420,
+      maxEdges: 900,
+      maxCodeChars: 340000
+    };
 
     function escapeMermaidLabel(s) {
       if (!s) return '';
@@ -1299,10 +1396,11 @@ $dropdownTopOptions
           else internal.push(lbl);
         });
 
-        var hasText = (n.content != null && String(n.content).length > 0);
+        var nodeContent = getNodeContent(n);
+        var hasText = (nodeContent != null && String(nodeContent).length > 0);
         var codeHtml = '';
         if (hasText) {
-          codeHtml = highlightContent(String(n.content), internal, external);
+          codeHtml = highlightContent(String(nodeContent), internal, external);
         } else if (n.isExternal) {
           codeHtml = escapeHtml('# Externe Referenz: kein lokaler Dateiinhalt verfügbar: ' + (n.fullPath || n.displayName || n.id));
         } else {
@@ -1569,39 +1667,285 @@ $dropdownTopOptions
       }
     }
 
+    function getEmbeddedContentData(safeKey) {
+      if (!safeKey) return null;
+      var el = document.getElementById('content-' + safeKey);
+      if (!el) return null;
+      var txt = el.textContent || el.innerText || '';
+      if (!txt) return null;
+      try {
+        return JSON.parse(txt);
+      } catch (e) {
+        console.error('Fehler beim Parsen eingebetteter Content-Daten für', safeKey, e);
+        return null;
+      }
+    }
+
+    function getNodeContent(node) {
+      if (!node || !node.id) return null;
+      if (node.content != null) return node.content;
+      if (currentContentData && Object.prototype.hasOwnProperty.call(currentContentData, node.id)) {
+        return currentContentData[node.id];
+      }
+      return null;
+    }
+
+    function setRenderStatus(msg, isWarning) {
+      if (!renderStatusEl) return;
+      renderStatusEl.className = isWarning
+        ? 'mt-2 text-xs text-amber-700'
+        : 'mt-2 text-xs text-gray-500';
+      renderStatusEl.textContent = msg || '';
+    }
+
+    function getFolderChunkKey(node) {
+      var rel = (node && node.relativePath) ? String(node.relativePath) : '';
+      var segs = rel.split(/[\/\\]/).filter(Boolean);
+      if (segs.length <= 1) return '(TopRoot)';
+      if (segs.length === 2) return '(TopRoot)';
+      return segs[1] || '(TopRoot)';
+    }
+
+    function buildFolderChunks(nodes, edges) {
+      var byKey = {};
+      (nodes || []).forEach(function(n) {
+        var key = getFolderChunkKey(n);
+        if (!byKey[key]) byKey[key] = [];
+        byKey[key].push(n);
+      });
+      var result = [];
+      Object.keys(byKey).sort(function(a, b) { return a.localeCompare(b); }).forEach(function(key) {
+        var ns = byKey[key];
+        var keep = {};
+        ns.forEach(function(n) { keep[n.id] = true; });
+        var es = (edges || []).filter(function(e) { return keep[e.sourceId] && keep[e.targetId]; });
+        result.push({
+          id: 'folder:' + key,
+          label: 'Ordner: ' + key + ' (' + ns.length + ' Knoten)',
+          nodes: ns,
+          edges: es
+        });
+      });
+      return result;
+    }
+
+    function buildComponentChunks(nodes, edges) {
+      var nodeById = {};
+      var adj = {};
+      (nodes || []).forEach(function(n) {
+        nodeById[n.id] = n;
+        adj[n.id] = [];
+      });
+      (edges || []).forEach(function(e) {
+        if (!adj[e.sourceId] || !adj[e.targetId]) return;
+        adj[e.sourceId].push(e.targetId);
+        adj[e.targetId].push(e.sourceId);
+      });
+
+      var visited = {};
+      var components = [];
+      Object.keys(nodeById).forEach(function(id) {
+        if (visited[id]) return;
+        var queue = [id];
+        visited[id] = true;
+        var ids = [];
+        while (queue.length > 0) {
+          var cur = queue.shift();
+          ids.push(cur);
+          (adj[cur] || []).forEach(function(nid) {
+            if (visited[nid]) return;
+            visited[nid] = true;
+            queue.push(nid);
+          });
+        }
+        var keep = {};
+        ids.forEach(function(nid) { keep[nid] = true; });
+        var ns = ids.map(function(nid) { return nodeById[nid]; });
+        var es = (edges || []).filter(function(e) { return keep[e.sourceId] && keep[e.targetId]; });
+        components.push({
+          id: 'component:' + components.length,
+          label: 'Komponente ' + (components.length + 1) + ' (' + ns.length + ' Knoten)',
+          nodes: ns,
+          edges: es
+        });
+      });
+      components.sort(function(a, b) { return b.nodes.length - a.nodes.length; });
+      return components;
+    }
+
+    function ensureChunkSelection(mode, chunks) {
+      if (!chunkSelect) return;
+      var previous = chunkSelect.value || 'all';
+      var options = ['<option value="all">Alle</option>'];
+      (chunks || []).forEach(function(c, idx) {
+        options.push('<option value="' + escapeHtml(c.id || String(idx)) + '">' + escapeHtml(c.label || ('Chunk ' + (idx + 1))) + '</option>');
+      });
+      chunkSelect.innerHTML = options.join('');
+      if (mode === 'all' || !chunks || chunks.length === 0) {
+        chunkSelect.value = 'all';
+        chunkSelect.disabled = true;
+        return;
+      }
+      chunkSelect.disabled = false;
+      var stillThere = (chunks || []).some(function(c) { return c.id === previous; });
+      chunkSelect.value = stillThere ? previous : ((chunks[0] && chunks[0].id) || 'all');
+    }
+
+    function applyChunkMode(nodes, edges) {
+      var mode = chunkModeSelect ? String(chunkModeSelect.value || 'all') : 'all';
+      var chunks = [];
+      if (mode === 'folder') {
+        chunks = buildFolderChunks(nodes, edges);
+      } else if (mode === 'component') {
+        chunks = buildComponentChunks(nodes, edges);
+      }
+      ensureChunkSelection(mode, chunks);
+
+      if (mode === 'all' || !chunkSelect || chunkSelect.value === 'all') {
+        currentChunkMeta = { mode: mode, chunkId: 'all', count: chunks.length };
+        return { nodes: nodes, edges: edges };
+      }
+
+      var selected = chunks.filter(function(c) { return c.id === chunkSelect.value; })[0];
+      if (!selected) {
+        selected = chunks[0] || null;
+        if (selected && chunkSelect) chunkSelect.value = selected.id;
+      }
+      if (!selected) return { nodes: nodes, edges: edges };
+      currentChunkMeta = { mode: mode, chunkId: selected.id, count: chunks.length };
+      return { nodes: selected.nodes, edges: selected.edges };
+    }
+
+    function applyVisibilityFilters(nodes, edges, forceHideComment, forceHideExternal) {
+      var useHideComment = !!(hideCommentLinksToggle && hideCommentLinksToggle.checked) || !!forceHideComment;
+      var useHideExternal = !!(hideExternalToggle && hideExternalToggle.checked) || !!forceHideExternal;
+      var n = (nodes || []).slice();
+      var e = (edges || []).slice();
+
+      if (useHideComment) {
+        e = e.filter(function(x) { return !x.isCommentLink; });
+      }
+      if (useHideExternal) {
+        if (currentTopVal && currentTopVal !== '[Extern]') {
+          n = n.filter(function(x) { return !x.isExternal && x.topFolder === currentTopVal; });
+        } else {
+          n = n.filter(function(x) { return !x.isExternal; });
+        }
+        var keep = {};
+        n.forEach(function(x) { keep[x.id] = true; });
+        e = e.filter(function(x) {
+          return !x.isCrossBoundary && keep[x.sourceId] && keep[x.targetId];
+        });
+      }
+      return { nodes: n, edges: e, hideComment: useHideComment, hideExternal: useHideExternal };
+    }
+
+    function exceedsRenderLimits(nodes, edges, code) {
+      return (nodes.length > RENDER_LIMITS.maxNodes) ||
+        (edges.length > RENDER_LIMITS.maxEdges) ||
+        (code && code.length > RENDER_LIMITS.maxCodeChars);
+    }
+
     function renderCurrentData() {
       if (!currentData) {
         mermaidTarget.innerHTML = '<p class="text-sm text-gray-500">Bitte einen Top-Ordner auswählen.</p>';
         if (codeSectionsEl) codeSectionsEl.innerHTML = '<p class="text-sm text-gray-500">Bitte einen Top-Ordner auswählen.</p>';
+        setRenderStatus('', false);
         return;
       }
-      var nodes = (currentData && currentData.nodes) || [];
-      var edges = (currentData && currentData.edges) || [];
+      var baseNodes = (currentData && currentData.nodes) || [];
+      var baseEdges = (currentData && currentData.edges) || [];
 
-      if (hideCommentLinksToggle && hideCommentLinksToggle.checked) {
-        edges = edges.filter(function(e) { return !e.isCommentLink; });
-      }
+      var attempts = [
+        { hideComment: false, hideExternal: false, reason: '' },
+        { hideComment: true,  hideExternal: false, reason: 'Automatisch: Kommentar-Links ausgeblendet' },
+        { hideComment: false, hideExternal: true,  reason: 'Automatisch: externe/cross-boundary Links ausgeblendet' },
+        { hideComment: true,  hideExternal: true,  reason: 'Automatisch: Kommentar- und externe Links ausgeblendet' }
+      ];
 
-      // Optional: alle roten Verweise (Cross-Boundary) inkl. deren Fremd-/Externe Knoten ausblenden
-      if (hideExternalToggle && hideExternalToggle.checked) {
-        if (currentTopVal && currentTopVal !== '[Extern]') {
-          nodes = nodes.filter(function(n) {
-            return !n.isExternal && n.topFolder === currentTopVal;
-          });
-        } else {
-          nodes = nodes.filter(function(n) { return !n.isExternal; });
+      var selected = null;
+      for (var i = 0; i < attempts.length; i++) {
+        var filtered = applyVisibilityFilters(baseNodes, baseEdges, attempts[i].hideComment, attempts[i].hideExternal);
+        var chunked = applyChunkMode(filtered.nodes, filtered.edges);
+        var codeCandidate = buildMermaidCode(chunked.nodes, chunked.edges);
+        if (!exceedsRenderLimits(chunked.nodes, chunked.edges, codeCandidate)) {
+          selected = {
+            nodes: chunked.nodes,
+            edges: chunked.edges,
+            code: codeCandidate,
+            reason: attempts[i].reason
+          };
+          break;
         }
-        var keepIds = {};
-        nodes.forEach(function(n) { keepIds[n.id] = true; });
-        edges = edges.filter(function(e) {
-          return !e.isCrossBoundary && keepIds[e.sourceId] && keepIds[e.targetId];
-        });
       }
 
-      var code = buildMermaidCode(nodes, edges);
-      currentRenderedNodes = nodes.slice();
-      renderMermaid(code);
-      renderCodeSections(nodes, edges);
+      if (!selected) {
+        if (chunkModeSelect && chunkModeSelect.value === 'all') {
+          chunkModeSelect.value = 'folder';
+          var filteredForSplit = applyVisibilityFilters(baseNodes, baseEdges, true, true);
+          var splitChunked = applyChunkMode(filteredForSplit.nodes, filteredForSplit.edges);
+          var splitCode = buildMermaidCode(splitChunked.nodes, splitChunked.edges);
+          if (!exceedsRenderLimits(splitChunked.nodes, splitChunked.edges, splitCode)) {
+            selected = {
+              nodes: splitChunked.nodes,
+              edges: splitChunked.edges,
+              code: splitCode,
+              reason: 'Automatisch: in Unterordner-Chunks aufgeteilt'
+            };
+          }
+        }
+      }
+
+      if (!selected) {
+        mermaidTarget.innerHTML = '<p class="text-sm text-red-600">Diagramm zu groß. Bitte Chunking aktivieren oder den Export-Scope weiter einschränken.</p>';
+        if (codeSectionsEl) codeSectionsEl.innerHTML = '<p class="text-sm text-gray-500">Keine darstellbare Auswahl.</p>';
+        setRenderStatus('Render-Limit erreicht: bitte Teilgraph wählen (Chunking) oder Scope mit IncludeFolders/MaxDepth/StartPath verkleinern.', true);
+        return;
+      }
+
+      currentRenderedNodes = selected.nodes.slice();
+      renderMermaid(selected.code);
+      renderCodeSections(selected.nodes, selected.edges);
+
+      var status = selected.reason || '';
+      status += (status ? ' | ' : '') + ('Knoten: ' + selected.nodes.length + ', Kanten: ' + selected.edges.length);
+      if (currentChunkMeta && currentChunkMeta.mode && currentChunkMeta.mode !== 'all') {
+        status += ' | Chunking: ' + currentChunkMeta.mode;
+      }
+      setRenderStatus(status, !!selected.reason);
+    }
+
+    function loadContentData(topVal, safeKey) {
+      if (!topVal || !safeKey) return Promise.resolve({});
+      if (contentCacheByTop[safeKey]) return Promise.resolve(contentCacheByTop[safeKey]);
+
+      var embedded = getEmbeddedContentData(safeKey);
+      if (embedded && embedded.contentByNodeId) {
+        contentCacheByTop[safeKey] = embedded.contentByNodeId;
+        return Promise.resolve(contentCacheByTop[safeKey]);
+      }
+
+      if (topVal === '[Extern]') {
+        contentCacheByTop[safeKey] = {};
+        return Promise.resolve({});
+      }
+
+      var jsonFile = 'ScriptFlowchart-All-' + safeKey + '-content.json';
+      return fetch(jsonFile, { cache: 'no-store' })
+        .then(function(resp) {
+          if (!resp.ok) throw new Error('HTTP ' + resp.status + ' beim Laden von ' + jsonFile);
+          return resp.json();
+        })
+        .then(function(data) {
+          var map = (data && data.contentByNodeId) || {};
+          contentCacheByTop[safeKey] = map;
+          return map;
+        })
+        .catch(function(err) {
+          console.warn('Konnte Content-JSON nicht laden:', err);
+          contentCacheByTop[safeKey] = {};
+          return {};
+        });
     }
 
     function loadAndRender(topVal) {
@@ -1610,41 +1954,32 @@ $dropdownTopOptions
       if (!topVal || !safeKey) {
         mermaidTarget.innerHTML = '<p class="text-sm text-gray-500">Bitte einen Top-Ordner auswählen.</p>';
         if (codeSectionsEl) codeSectionsEl.innerHTML = '<p class="text-sm text-gray-500">Bitte einen Top-Ordner auswählen.</p>';
+        setRenderStatus('', false);
         return;
       }
 
-      // Datei-Modus oder externe Ziele: direkt aus eingebetteten JSON-Daten lesen (funktioniert auch bei file://)
-      if (window.location.protocol === 'file:' || topVal === '[Extern]') {
-        var data = getEmbeddedData(safeKey);
-        if (!data) {
-          mermaidTarget.innerHTML = '<p class="text-sm text-red-600">Keine eingebetteten Daten für ' + topVal + ' gefunden.</p>';
-          return;
-        }
-        currentData = data;
-        renderCurrentData();
-        return;
-      }
-
-      // HTTP-Modus: JSON-Dateien dynamisch nachladen
       var jsonFile = 'ScriptFlowchart-All-' + safeKey + '.json';
-      if (!jsonFile) {
-        mermaidTarget.innerHTML = '<p class="text-sm text-gray-500">Bitte einen Top-Ordner auswählen.</p>';
-        return;
-      }
       mermaidTarget.textContent = 'Lade Daten für ' + topVal + ' ...';
-      fetch(jsonFile, { cache: 'no-store' })
-        .then(function(resp) {
-          if (!resp.ok) {
-            throw new Error('HTTP ' + resp.status + ' beim Laden von ' + jsonFile);
-          }
+      setRenderStatus('Lade Graph- und Content-Daten ...', false);
+
+      var dataPromise = Promise.resolve().then(function() {
+        var embedded = getEmbeddedData(safeKey);
+        if (embedded) return embedded;
+        return fetch(jsonFile, { cache: 'no-store' }).then(function(resp) {
+          if (!resp.ok) throw new Error('HTTP ' + resp.status + ' beim Laden von ' + jsonFile);
           return resp.json();
-        })
-        .then(function(data) {
-          currentData = data;
+        });
+      });
+
+      Promise.all([dataPromise, loadContentData(topVal, safeKey)])
+        .then(function(results) {
+          currentData = results[0] || { nodes: [], edges: [] };
+          currentContentData = results[1] || {};
           renderCurrentData();
         })
         .catch(function(err) {
           mermaidTarget.textContent = 'Fehler beim Laden der Daten: ' + (err.message || String(err));
+          setRenderStatus('Laden fehlgeschlagen.', true);
         });
     }
 
@@ -1659,6 +1994,16 @@ $dropdownTopOptions
     }
     if (hideCommentLinksToggle) {
       hideCommentLinksToggle.addEventListener('change', function() {
+        renderCurrentData();
+      });
+    }
+    if (chunkModeSelect) {
+      chunkModeSelect.addEventListener('change', function() {
+        renderCurrentData();
+      });
+    }
+    if (chunkSelect) {
+      chunkSelect.addEventListener('change', function() {
         renderCurrentData();
       });
     }
@@ -1706,6 +2051,7 @@ $dropdownTopOptions
     } else if (mermaidTarget) {
       mermaidTarget.textContent = 'Kein Top-Ordner-Filter gefunden.';
     }
+    setRenderStatus('', false);
   })();
   </script>
 </body>
@@ -1727,6 +2073,7 @@ $rootResolved = Resolve-Path -Path $ScriptsPath -ErrorAction Stop
 $rootPath = $rootResolved.ProviderPath
 
 $normalizedExclude = @(Get-NormalizedExcludeFolders -Folders $ExcludeFolders)
+$normalizedInclude = @(Get-NormalizedIncludeFolders -Folders $IncludeFolders)
 if (@($normalizedExclude).Count -gt 0) {
     Write-Host ("Ausschlussordner (inkl. Unterordner) werden ignoriert: {0}" -f ($normalizedExclude -join ', ')) -ForegroundColor Yellow
     foreach ($prefix in $normalizedExclude) {
@@ -1735,6 +2082,12 @@ if (@($normalizedExclude).Count -gt 0) {
             Write-Warning "Ausschlussordner '$prefix' wurde unterhalb von '$rootPath' nicht gefunden."
         }
     }
+}
+if (@($normalizedInclude).Count -gt 0) {
+    Write-Host ("Einschlussordner (nur diese Teilbäume): {0}" -f ($normalizedInclude -join ', ')) -ForegroundColor Yellow
+}
+if ($MaxDepth -ge 0) {
+    Write-Host ("MaxDepth aktiv: {0}" -f $MaxDepth) -ForegroundColor Yellow
 }
 
 Write-Host "Scanne $rootPath (alle Dateien) ..." -ForegroundColor Cyan
@@ -1747,6 +2100,23 @@ catch {
     return
 }
 
+$candidateFiles = @(
+    $allFiles | Where-Object {
+        if (Test-IsExcludedPath -FullPath $_.FullName -RootPath $rootPath -ExcludePrefixes $normalizedExclude) {
+            return $false
+        }
+        if (-not (Test-IsIncludedPath -FullPath $_.FullName -RootPath $rootPath -IncludePrefixes $normalizedInclude)) {
+            return $false
+        }
+        if ($MaxDepth -ge 0) {
+            $rel = Get-RelativePath -FullPath $_.FullName -RootPath $rootPath
+            $depth = Get-DepthFromRelativePath -RelativePath $rel
+            if ($depth -gt $MaxDepth) { return $false }
+        }
+        return $true
+    }
+)
+
 $nodesByPath = @{}
 $nodeList = New-Object System.Collections.Generic.List[object]
 $nameIndex = @{}
@@ -1755,25 +2125,19 @@ $externalNodesByLabel = @{}
 $nextId = [ref]0
 
 # Zuerst: alle lokalen Dateien als Knoten anlegen
-foreach ($f in $allFiles) {
-    if (Test-IsExcludedPath -FullPath $f.FullName -RootPath $rootPath -ExcludePrefixes $normalizedExclude) {
-        continue
-    }
+foreach ($f in $candidateFiles) {
     [void](New-Node -NodesByPath $nodesByPath -NodeList $nodeList -NameIndex $nameIndex -FullPath $f.FullName -RootPath $rootPath -IsExternal:$false -NextId $nextId)
 }
 
-Write-Host ("Gefunden: {0} Dateien (nach Ausschlussfilter)." -f $nodeList.Count) -ForegroundColor Cyan
+Write-Host ("Gefunden: {0} Dateien (nach Scope-Filter)." -f $nodeList.Count) -ForegroundColor Cyan
 
 # Danach: textbasierte Dateien nach Verknüpfungen durchsuchen
 $edgeListRaw = New-Object System.Collections.Generic.List[object]
 
-$total = [math]::Max(1, @($allFiles).Count)
+$total = [math]::Max(1, @($candidateFiles).Count)
 $i = 0
-foreach ($f in $allFiles) {
+foreach ($f in $candidateFiles) {
     $i++
-    if (Test-IsExcludedPath -FullPath $f.FullName -RootPath $rootPath -ExcludePrefixes $normalizedExclude) {
-        continue
-    }
     $extInfo = Get-EffectiveExtensionInfo -Path $f.FullName
     $ext = [string]$extInfo.EffectiveExtension
     if (-not ($script:TextLikeExtensions -contains $ext)) {
@@ -1837,6 +2201,70 @@ foreach ($e in $edgeListRaw) {
 
 Write-Host ("Verknüpfungen gefunden: {0}" -f $edgesFinal.Count) -ForegroundColor Cyan
 
+$activeNodeList = $nodeList
+$activeEdgesFinal = $edgesFinal
+
+if (-not [string]::IsNullOrWhiteSpace($StartPath)) {
+    $startNorm = $StartPath.Trim()
+    $startFull = $startNorm
+    if (-not [System.IO.Path]::IsPathRooted($startNorm)) {
+        $startFull = Join-Path -Path $rootPath -ChildPath ($startNorm -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+    }
+    try {
+        $startResolved = Resolve-Path -LiteralPath $startFull -ErrorAction Stop
+        $startFull = $startResolved.ProviderPath
+    }
+    catch {
+        # Falls Resolve-Path fehlschlägt, versuchen wir unten den relativen Match.
+    }
+    $startRelNorm = ($startNorm -replace '\\', '/').Trim('/')
+
+    $startNode = $activeNodeList | Where-Object {
+        $_.FullPath.Equals($startFull, [StringComparison]::OrdinalIgnoreCase) -or
+        (($_.RelativePath -replace '\\', '/').Trim('/')).Equals($startRelNorm, [StringComparison]::OrdinalIgnoreCase)
+    } | Select-Object -First 1
+
+    if (-not $startNode) {
+        Write-Error "StartPath '$StartPath' konnte nicht auf eine analysierte Datei abgebildet werden."
+        return
+    }
+
+    $adj = @{}
+    foreach ($e in $activeEdgesFinal) {
+        if (-not $adj.ContainsKey($e.SourceId)) { $adj[$e.SourceId] = New-Object System.Collections.Generic.List[string] }
+        if (-not $adj.ContainsKey($e.TargetId)) { $adj[$e.TargetId] = New-Object System.Collections.Generic.List[string] }
+        $adj[$e.SourceId].Add([string]$e.TargetId) | Out-Null
+        $adj[$e.TargetId].Add([string]$e.SourceId) | Out-Null
+    }
+
+    $visited = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+    $distance = @{}
+    $q = New-Object System.Collections.Generic.Queue[string]
+    $rootId = [string]$startNode.Id
+    $visited.Add($rootId) | Out-Null
+    $distance[$rootId] = 0
+    $q.Enqueue($rootId)
+
+    while ($q.Count -gt 0) {
+        $cur = $q.Dequeue()
+        $curDist = [int]$distance[$cur]
+        if ($curDist -ge $Hops) { continue }
+        if (-not $adj.ContainsKey($cur)) { continue }
+        foreach ($nId in $adj[$cur]) {
+            if ($visited.Contains($nId)) { continue }
+            $visited.Add($nId) | Out-Null
+            $distance[$nId] = $curDist + 1
+            $q.Enqueue($nId)
+        }
+    }
+
+    $activeNodeList = @($activeNodeList | Where-Object { $visited.Contains([string]$_.Id) })
+    $activeEdgesFinal = @($activeEdgesFinal | Where-Object {
+        $visited.Contains([string]$_.SourceId) -and $visited.Contains([string]$_.TargetId)
+    })
+    Write-Host ("StartPath/Hops aktiv: Seed '{0}', Hops={1}, Nodes={2}, Edges={3}" -f $startNode.DisplayName, $Hops, $activeNodeList.Count, $activeEdgesFinal.Count) -ForegroundColor Yellow
+}
+
 # Ausgabe-Datei auflösen/anlegen
 $outResolved = $OutputPath
 if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
@@ -1849,12 +2277,12 @@ if (-not [string]::IsNullOrEmpty($outDir) -and -not (Test-Path $outDir)) {
 
 # Top-Ordner ermitteln
 $internalTopFolders = @(
-    $nodeList |
+    $activeNodeList |
         Where-Object { -not $_.IsExternal } |
         Select-Object -ExpandProperty TopFolder -Unique |
         Sort-Object
 )
-$hasExternalNodes = $nodeList | Where-Object { $_.IsExternal } | Select-Object -First 1
+$hasExternalNodes = $activeNodeList | Where-Object { $_.IsExternal } | Select-Object -First 1
 $topFoldersForTemplate = @($internalTopFolders)
 if ($hasExternalNodes) {
     $topFoldersForTemplate += '[Extern]'
@@ -1862,8 +2290,10 @@ if ($hasExternalNodes) {
 
 # JSON-Dateien pro Top-Ordner erzeugen
 $embeddedData = @{}
+$embeddedContentData = @{}
+$calibrationStats = New-Object System.Collections.Generic.List[object]
 foreach ($tf in $internalTopFolders) {
-    $localNodes = @($nodeList | Where-Object { -not $_.IsExternal -and $_.TopFolder -eq $tf })
+    $localNodes = @($activeNodeList | Where-Object { -not $_.IsExternal -and $_.TopFolder -eq $tf })
     if ($localNodes.Count -eq 0) { continue }
 
     $pathSet = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
@@ -1872,7 +2302,7 @@ foreach ($tf in $internalTopFolders) {
     }
 
     $localEdges = @(
-        $edgesFinal | Where-Object {
+        $activeEdgesFinal | Where-Object {
             $pathSet.Contains($_.SourcePath) -or $pathSet.Contains($_.TargetPath)
         }
     )
@@ -1883,8 +2313,15 @@ foreach ($tf in $internalTopFolders) {
     }
 
     $nodesForTf = @(
-        $nodeList | Where-Object { $pathSet.Contains($_.FullPath) }
+        $activeNodeList | Where-Object { $pathSet.Contains($_.FullPath) }
     )
+
+    $contentByNodeId = [ordered]@{}
+    foreach ($nodeItem in $nodesForTf) {
+        if ($null -ne $nodeItem.Content) {
+            $contentByNodeId[$nodeItem.Id] = (Get-SanitizedContentForJson -Content $nodeItem.Content)
+        }
+    }
 
     $reportNodesTf = @(
         $nodesForTf | ForEach-Object {
@@ -1897,7 +2334,6 @@ foreach ($tf in $internalTopFolders) {
                 relativePath = $_.RelativePath
                 folderDepth  = $_.FolderDepth
                 isExternal   = [bool]$_.IsExternal
-                content      = (Get-SanitizedContentForJson -Content $_.Content)
             }
         }
     )
@@ -1924,20 +2360,38 @@ foreach ($tf in $internalTopFolders) {
     $jsonFileName = "ScriptFlowchart-All-$safeTf.json"
     $jsonPath = Join-Path -Path $outDir -ChildPath $jsonFileName
     $json | Set-Content -Path $jsonPath -Encoding UTF8
-    $embeddedData[$safeTf] = $json
+    if ($EmbedTopFolderData.IsPresent) {
+        $embeddedData[$safeTf] = $json
+    }
+
+    $contentObj = @{ contentByNodeId = $contentByNodeId }
+    $contentJson = $contentObj | ConvertTo-Json -Depth 4 -Compress
+    $contentFileName = "ScriptFlowchart-All-$safeTf-content.json"
+    $contentPath = Join-Path -Path $outDir -ChildPath $contentFileName
+    $contentJson | Set-Content -Path $contentPath -Encoding UTF8
+    if ($EmbedTopFolderData.IsPresent) {
+        $embeddedContentData[$safeTf] = $contentJson
+    }
+    $calibrationStats.Add([pscustomobject]@{
+        TopFolder = $tf
+        Nodes     = @($reportNodesTf).Count
+        Edges     = @($reportEdgesTf).Count
+        GraphChars = $json.Length
+        ContentChars = $contentJson.Length
+    }) | Out-Null
     Write-Host ("JSON für Top-Ordner '{0}' geschrieben: {1}" -f $tf, $jsonFileName) -ForegroundColor Green
 }
 
 # JSON-Struktur für externe Ziele (nur eingebettet, keine eigene Datei)
 if ($hasExternalNodes) {
-    $externalNodes = @($nodeList | Where-Object { $_.IsExternal })
+    $externalNodes = @($activeNodeList | Where-Object { $_.IsExternal })
     if ($externalNodes.Count -gt 0) {
         $extPathSet = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
         foreach ($n in $externalNodes) {
             if ($n.FullPath) { [void]$extPathSet.Add($n.FullPath) }
         }
         $extEdges = @(
-            $edgesFinal | Where-Object {
+            $activeEdgesFinal | Where-Object {
                 $extPathSet.Contains($_.SourcePath) -and $extPathSet.Contains($_.TargetPath)
             }
         )
@@ -1973,10 +2427,19 @@ if ($hasExternalNodes) {
         $objExt = @{ nodes = $reportNodesExt; edges = $reportEdgesExt }
         $jsonExt = $objExt | ConvertTo-Json -Depth 4 -Compress
         $embeddedData['EXTERN'] = $jsonExt
+        $embeddedContentData['EXTERN'] = (@{ contentByNodeId = @{} } | ConvertTo-Json -Depth 3 -Compress)
         Write-Host "Struktur für externe Ziele vorbereitet (nur eingebettet, keine JSON-Datei)." -ForegroundColor Green
     }
 }
 
 # HTML-Template schreiben (lädt pro Auswahl die passende JSON-Datei nach)
-Export-ScriptLinksFlowchartTemplate -TopFolders $topFoldersForTemplate -EmbeddedData $embeddedData -OutputFilePath $outResolved
+Export-ScriptLinksFlowchartTemplate -TopFolders $topFoldersForTemplate -EmbeddedData $embeddedData -EmbeddedContentData $embeddedContentData -OutputFilePath $outResolved
+
+if ($calibrationStats.Count -gt 0) {
+    $worst = $calibrationStats | Sort-Object -Property GraphChars -Descending | Select-Object -First 1
+    Write-Host ("Kalibrierung: größter Top-Ordner '{0}' => Nodes={1}, Edges={2}, GraphJSON={3} chars, ContentJSON={4} chars" -f $worst.TopFolder, $worst.Nodes, $worst.Edges, $worst.GraphChars, $worst.ContentChars) -ForegroundColor Yellow
+    if ($worst.GraphChars -gt 300000) {
+        Write-Warning "GraphJSON sehr groß. Empfohlen: MaxDepth/IncludeFolders/StartPath verwenden oder Chunking im Viewer aktivieren."
+    }
+}
 
