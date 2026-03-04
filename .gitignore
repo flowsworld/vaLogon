@@ -1,6 +1,7 @@
 # Analyse-Output
 AnalysisResults/
 sysvol_analysis_checkpoint.json
+CopilotScriptAnalysis*.md
 
 # OS / Editor
 .DS_Store
