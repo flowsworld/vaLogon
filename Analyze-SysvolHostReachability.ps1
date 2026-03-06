@@ -82,9 +82,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:FileExtensions = @('.ps1', '.psm1', '.bat', '.cmd', '.vbs', '.kix', '.txt')
-$script:ExcludedHosts = @('localhost', '127.0.0.1', '0.0.0.0', '::1', '')
+$script:ExcludedHosts = @('localhost', '127.0.0.1', '0.0.0.0', '::1', '', '.', '..', ',', '''', '"', ';', ':', '*', '?')
 $script:CheckpointFileName = 'sysvol_host_reachability_checkpoint.json'
-$script:CheckpointVersion = 2
+$script:CheckpointVersion = 3
 
 function Resolve-PathSafe {
     [CmdletBinding()]
@@ -156,6 +156,10 @@ function ConvertTo-SerializableHostResults {
             PingOk     = [bool]$hr.PingOk
             Ports      = $portStr
             WinRmOk    = $hr.WinRmOk
+            ResolvedIps = @($hr.ResolvedIps | Where-Object { $_ } | Sort-Object -Unique)
+            DnsInfo    = [string]$hr.DnsInfo
+            PingInfo   = [string]$hr.PingInfo
+            CheckedAtUtc = $hr.CheckedAtUtc
             TopFolders = @($hr.TopFolders)
         }
     })
@@ -171,6 +175,8 @@ function ConvertTo-NormalizedHostResults {
     $byHost = @{}
     foreach ($r in @($HostResults)) {
         if ($null -eq $r -or [string]::IsNullOrWhiteSpace($r.Host)) { continue }
+        $hostName = Normalize-HostCandidate -Candidate ([string]$r.Host)
+        if (-not (Test-IsValidHostCandidate -Candidate $hostName)) { continue }
         $ht = @{}
         if ($r.Ports -is [hashtable]) {
             foreach ($k in $r.Ports.Keys) { $ht[[int]$k] = [bool]$r.Ports[$k] }
@@ -183,13 +189,17 @@ function ConvertTo-NormalizedHostResults {
         }
         $tfs = @()
         if ($r.TopFolders) { $tfs = @($r.TopFolders) }
-        elseif ($HostToTopFolders.ContainsKey([string]$r.Host)) { $tfs = @($HostToTopFolders[[string]$r.Host]) }
-        $byHost[[string]$r.Host] = [pscustomobject]@{
-            Host       = [string]$r.Host
+        elseif ($HostToTopFolders.ContainsKey($hostName)) { $tfs = @($HostToTopFolders[$hostName]) }
+        $byHost[$hostName] = [pscustomobject]@{
+            Host       = $hostName
             DnsOk      = [bool]$r.DnsOk
             PingOk     = [bool]$r.PingOk
             Ports      = $ht
             WinRmOk    = $r.WinRmOk
+            ResolvedIps = @($r.ResolvedIps | Where-Object { $_ } | Sort-Object -Unique)
+            DnsInfo    = [string]$r.DnsInfo
+            PingInfo   = [string]$r.PingInfo
+            CheckedAtUtc = $r.CheckedAtUtc
             TopFolders = @($tfs | Where-Object { $_ } | Sort-Object -Unique)
         }
     }
@@ -213,7 +223,8 @@ function ConvertTo-NormalizedUniqueHosts {
             $hostName = [string]$entry.Host
             $tfs = @($entry.TopFolders)
         }
-        if ([string]::IsNullOrWhiteSpace($hostName)) { continue }
+        $hostName = Normalize-HostCandidate -Candidate $hostName
+        if (-not (Test-IsValidHostCandidate -Candidate $hostName)) { continue }
         if (-not $byHost.ContainsKey($hostName)) {
             $byHost[$hostName] = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         }
@@ -248,6 +259,8 @@ function ConvertTo-NormalizedSubnetData {
             SourceTopFolders = @($s.SourceTopFolders | Where-Object { $_ } | Sort-Object -Unique)
             Subnet           = $key
             ReachableIPs     = @($s.ReachableIPs | Where-Object { $_ } | Sort-Object -Unique)
+            ScanStartedUtc   = $s.ScanStartedUtc
+            ScanFinishedUtc  = $s.ScanFinishedUtc
         }
     }
     if ($bySubnet.Count -eq 0) { return @() }
@@ -432,6 +445,63 @@ function Save-ResumeState {
     Write-ResumeArtifacts -State $State -ArtifactPaths $ArtifactPaths
 }
 
+function Normalize-HostCandidate {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Candidate
+    )
+    if ([string]::IsNullOrWhiteSpace($Candidate)) { return '' }
+    $h = $Candidate.Trim()
+
+    # Häufige umschließende Satzzeichen entfernen.
+    $h = $h -replace '^[\s''",;:()\[\]{}<>]+', ''
+    $h = $h -replace '[\s''",;:()\[\]{}<>]+$', ''
+
+    # Einzelnen abschließenden DNS-Punkt normalisieren (host.local. -> host.local).
+    while ($h.EndsWith('.', [StringComparison]::Ordinal)) {
+        $h = $h.TrimEnd('.')
+    }
+
+    # Lokale UNC-Namensräume und versteckte Shares als Hostkandidaten ausfiltern.
+    if ($h.StartsWith('.', [StringComparison]::Ordinal) -or $h.StartsWith('$', [StringComparison]::Ordinal)) {
+        return ''
+    }
+
+    return $h.Trim()
+}
+
+function Test-IsValidHostCandidate {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Candidate
+    )
+    if ([string]::IsNullOrWhiteSpace($Candidate)) { return $false }
+    $h = $Candidate.Trim()
+    if ($script:ExcludedHosts -contains $h) { return $false }
+    if ($h -match '^%') { return $false }
+
+    # Nur bekannte Zeichen für Host/IP akzeptieren.
+    if ($h -notmatch '^[A-Za-z0-9._-]+$') { return $false }
+    if ($h -notmatch '[A-Za-z0-9]') { return $false }
+
+    $ip = $null
+    if ([System.Net.IPAddress]::TryParse($h, [ref]$ip)) {
+        return ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork)
+    }
+
+    # Einfache Host/FQDN-Validierung (Labels dürfen nicht mit '-' starten/enden).
+    $labels = $h.Split('.')
+    if ($labels.Count -eq 0) { return $false }
+    foreach ($label in $labels) {
+        if ([string]::IsNullOrWhiteSpace($label)) { return $false }
+        if ($label.Length -gt 63) { return $false }
+        if ($label.StartsWith('-', [StringComparison]::Ordinal) -or $label.EndsWith('-', [StringComparison]::Ordinal)) { return $false }
+    }
+    return $true
+}
+
 function Get-FileContentSafe {
     [CmdletBinding()]
     param(
@@ -477,19 +547,19 @@ function Get-UniqueHostsFromContent {
     $hosts = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
     # UNC: \\Server\Share
-    foreach ($m in [regex]::Matches($Content, '\\\\([^\\\s]+)', $opts)) {
-        $h = $m.Groups[1].Value.Trim()
-        if ($h) { [void]$hosts.Add($h) }
+    foreach ($m in [regex]::Matches($Content, '\\\\([^\\\/\s]+)\\[^\\\s]+', $opts)) {
+        $h = Normalize-HostCandidate -Candidate $m.Groups[1].Value
+        if (Test-IsValidHostCandidate -Candidate $h) { [void]$hosts.Add($h) }
     }
-    # IPv4 (einfach)
+    # IPv4
     foreach ($m in [regex]::Matches($Content, '\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b')) {
-        $h = $m.Groups[1].Value
-        if ($h) { [void]$hosts.Add($h) }
+        $h = Normalize-HostCandidate -Candidate $m.Groups[1].Value
+        if (Test-IsValidHostCandidate -Candidate $h) { [void]$hosts.Add($h) }
     }
     # URL host: http(s)://host
     foreach ($m in [regex]::Matches($Content, 'https?://([^/\s:]+)', $opts)) {
-        $h = $m.Groups[1].Value.Trim()
-        if ($h) { [void]$hosts.Add($h) }
+        $h = Normalize-HostCandidate -Candidate $m.Groups[1].Value
+        if (Test-IsValidHostCandidate -Candidate $h) { [void]$hosts.Add($h) }
     }
 
     $result = @($hosts)
@@ -521,10 +591,8 @@ function Get-AllUniqueHosts {
         if ($null -eq $content -or $content -eq '') { continue }
         $found = Get-UniqueHostsFromContent -Content $content
         foreach ($h in $found) {
-            $h = $h.Trim()
-            if ([string]::IsNullOrWhiteSpace($h)) { continue }
-            if ($script:ExcludedHosts -contains $h) { continue }
-            if ($h -match '^%') { continue }
+            $h = Normalize-HostCandidate -Candidate $h
+            if (-not (Test-IsValidHostCandidate -Candidate $h)) { continue }
             if (-not $hostToTopFolders.ContainsKey($h)) {
                 $hostToTopFolders[$h] = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
             }
@@ -707,6 +775,10 @@ function ConvertTo-ReportHostResults {
             pingOk     = [bool]$_.PingOk
             ports      = $portsObj
             winRmOk    = $_.WinRmOk
+            resolvedIps = @($_.ResolvedIps | Where-Object { $_ } | Sort-Object -Unique)
+            dnsInfo    = [string]$_.DnsInfo
+            pingInfo   = [string]$_.PingInfo
+            checkedAtUtc = $_.CheckedAtUtc
         }
     })
 }
@@ -722,6 +794,8 @@ function ConvertTo-ReportSubnetData {
             sourceTopFolders = @($_.SourceTopFolders | Where-Object { $_ } | Sort-Object -Unique)
             subnet           = [string]$_.Subnet
             reachableIps     = @($_.ReachableIPs | Where-Object { $_ } | Sort-Object -Unique)
+            scanStartedUtc   = $_.ScanStartedUtc
+            scanFinishedUtc  = $_.ScanFinishedUtc
         }
     })
 }
@@ -767,6 +841,7 @@ function New-HostReachabilityDataset {
     }).Count
     return [ordered]@{
         scopeTopFolder     = $TopFolder
+        generatedAtUtc     = (Get-Date).ToUniversalTime()
         summary            = [ordered]@{
             filesScanned = $filesCount
             hostCount    = @($hostsFiltered).Count
@@ -877,19 +952,21 @@ $dropdownOptions
 
     <section class="mb-8 bg-white rounded-xl shadow p-4 overflow-x-auto">
       <h2 class="text-lg font-semibold text-gray-800 mb-3">Erreichbarkeit pro Host</h2>
-      <table class="w-full text-left border-collapse">
+      <table id="hosts-table" class="w-full text-left border-collapse">
         <thead>
           <tr class="border-b border-gray-300">
-            <th class="py-2 pr-4">Host</th>
-            <th class="py-2 pr-4">DNS</th>
-            <th class="py-2 pr-4">Ping</th>
-            <th class="py-2 pr-4">80</th>
-            <th class="py-2 pr-4">443</th>
-            <th class="py-2 pr-4">445 (SMB)</th>
-            <th class="py-2 pr-4">135 (RPC)</th>
-            <th class="py-2 pr-4">3389 (RDP)</th>
-            <th class="py-2 pr-4">5985 (WinRM)</th>
-            <th class="py-2 pr-4">WinRM Test</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="hosts" data-sort="host" title="Sortieren">Host</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="hosts" data-sort="ips" title="Sortieren">IP(s)</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="hosts" data-sort="dns" title="Sortieren">DNS</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="hosts" data-sort="ping" title="Sortieren">Ping</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="hosts" data-sort="p80" title="Sortieren">80</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="hosts" data-sort="p443" title="Sortieren">443</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="hosts" data-sort="p445" title="Sortieren">445 (SMB)</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="hosts" data-sort="p135" title="Sortieren">135 (RPC)</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="hosts" data-sort="p3389" title="Sortieren">3389 (RDP)</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="hosts" data-sort="p5985" title="Sortieren">5985 (WinRM)</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="hosts" data-sort="winrm" title="Sortieren">WinRM Test</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="hosts" data-sort="checkedAtUtc" title="Sortieren">Geprüft (UTC)</th>
           </tr>
         </thead>
         <tbody id="hosts-tbody"></tbody>
@@ -899,13 +976,15 @@ $dropdownOptions
     <section class="mb-8 bg-white rounded-xl shadow p-4 overflow-x-auto hidden" id="subnet-section">
       <h2 class="text-lg font-semibold text-gray-800 mb-3">Subnet-Scan (pingbare Endpunkte)</h2>
       <p class="text-sm text-gray-600 mb-3">Pro ermitteltem Host wurde das zugehörige Subnetz (/24) nach erreichbaren (pingbaren) IP-Adressen durchsucht.</p>
-      <table class="w-full text-left border-collapse">
+      <table id="subnet-table" class="w-full text-left border-collapse">
         <thead>
           <tr class="border-b border-gray-300">
-            <th class="py-2 pr-4">Quell-Host</th>
-            <th class="py-2 pr-4">Subnetz</th>
-            <th class="py-2 pr-4">Anzahl erreichbar</th>
-            <th class="py-2 pr-4">Erreichbare IPs</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="subnet" data-sort="sourceHost" title="Sortieren">Quell-Host</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="subnet" data-sort="subnet" title="Sortieren">Subnetz</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="subnet" data-sort="reachableCount" title="Sortieren">Anzahl erreichbar</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="subnet" data-sort="reachableIps" title="Sortieren">Erreichbare IPs</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="subnet" data-sort="scanStartedUtc" title="Sortieren">Scan-Start (UTC)</th>
+            <th class="py-2 pr-4 cursor-pointer select-none" data-table="subnet" data-sort="scanFinishedUtc" title="Sortieren">Scan-Ende (UTC)</th>
           </tr>
         </thead>
         <tbody id="subnet-tbody"></tbody>
@@ -924,8 +1003,10 @@ $dropdownOptions
     var select = document.getElementById('filter-topfolder');
     var loadStatus = document.getElementById('load-status');
     var hostsTbody = document.getElementById('hosts-tbody');
+    var hostsTable = document.getElementById('hosts-table');
     var subnetSection = document.getElementById('subnet-section');
     var subnetTbody = document.getElementById('subnet-tbody');
+    var subnetTable = document.getElementById('subnet-table');
     var summaryFiles = document.getElementById('summary-files');
     var summaryHosts = document.getElementById('summary-hosts');
     var summaryPing = document.getElementById('summary-ping');
@@ -935,10 +1016,47 @@ $dropdownOptions
     var badgeFail = 'bg-red-100 text-red-800 rounded px-2 py-0.5 text-sm';
     var badgeNa = 'bg-gray-100 text-gray-600 rounded px-2 py-0.5 text-sm';
     var portsOrder = [80, 443, 445, 135, 3389, 5985];
+    var currentHosts = [];
+    var currentSubnet = [];
+    var sortState = {
+      hosts: { key: 'host', dir: 1 },
+      subnet: { key: 'subnet', dir: 1 }
+    };
 
     function escapeHtml(s) {
       if (s == null) return '';
       return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+    }
+
+    function toArray(v) {
+      if (!Array.isArray(v)) return [];
+      return v.filter(function(x) { return x != null; });
+    }
+
+    function formatUtc(value) {
+      if (!value) return '-';
+      var d = new Date(value);
+      if (isNaN(d.getTime())) return String(value);
+      return d.toISOString().replace('T', ' ').replace('Z', 'Z');
+    }
+
+    function toTimestamp(value) {
+      if (!value) return 0;
+      var d = new Date(value);
+      if (isNaN(d.getTime())) return 0;
+      return d.getTime();
+    }
+
+    function boolRank(v) {
+      if (v === null || typeof v === 'undefined') return -1;
+      return v ? 1 : 0;
+    }
+
+    function buildTitle(lines) {
+      var safeLines = (lines || [])
+        .map(function(x) { return (x == null ? '' : String(x)).trim(); })
+        .filter(function(x) { return x.length > 0; });
+      return escapeHtml(safeLines.join('\n'));
     }
 
     function badgeHtml(ok, naText) {
@@ -946,11 +1064,96 @@ $dropdownOptions
       return '<span class="' + (ok ? badgeOk : badgeFail) + '">' + (ok ? 'OK' : 'Fehler') + '</span>';
     }
 
+    function compareValues(a, b) {
+      if (typeof a === 'number' && typeof b === 'number') return a - b;
+      return String(a).localeCompare(String(b), 'de', { sensitivity: 'base', numeric: true });
+    }
+
+    function sortRows(rows, tableName) {
+      var list = toArray(rows).slice();
+      var state = sortState[tableName];
+      if (!state || !state.key) return list;
+      var key = state.key;
+      var dir = state.dir || 1;
+      list.sort(function(a, b) {
+        var av = tableName === 'hosts' ? getHostSortValue(a, key) : getSubnetSortValue(a, key);
+        var bv = tableName === 'hosts' ? getHostSortValue(b, key) : getSubnetSortValue(b, key);
+        return compareValues(av, bv) * dir;
+      });
+      return list;
+    }
+
+    function getHostSortValue(row, key) {
+      if (!row || typeof row !== 'object') return '';
+      var ports = row.ports || {};
+      switch (key) {
+        case 'host': return String(row.host || '').toLowerCase();
+        case 'ips': return toArray(row.resolvedIps).join(',').toLowerCase();
+        case 'dns': return boolRank(row.dnsOk);
+        case 'ping': return boolRank(row.pingOk);
+        case 'p80': return boolRank(ports['80']);
+        case 'p443': return boolRank(ports['443']);
+        case 'p445': return boolRank(ports['445']);
+        case 'p135': return boolRank(ports['135']);
+        case 'p3389': return boolRank(ports['3389']);
+        case 'p5985': return boolRank(ports['5985']);
+        case 'winrm': return boolRank(row.winRmOk);
+        case 'checkedAtUtc': return toTimestamp(row.checkedAtUtc);
+        default: return String(row[key] || '').toLowerCase();
+      }
+    }
+
+    function getSubnetSortValue(row, key) {
+      if (!row || typeof row !== 'object') return '';
+      var ips = toArray(row.reachableIps);
+      switch (key) {
+        case 'sourceHost': return String(row.sourceHost || '').toLowerCase();
+        case 'subnet': return String(row.subnet || '').toLowerCase();
+        case 'reachableCount': return ips.length;
+        case 'reachableIps': return ips.join(',').toLowerCase();
+        case 'scanStartedUtc': return toTimestamp(row.scanStartedUtc);
+        case 'scanFinishedUtc': return toTimestamp(row.scanFinishedUtc);
+        default: return String(row[key] || '').toLowerCase();
+      }
+    }
+
+    function renderSortIndicators() {
+      document.querySelectorAll('th[data-sort][data-table]').forEach(function(th) {
+        if (!th.dataset.label) th.dataset.label = th.textContent.trim();
+        var tableName = th.dataset.table;
+        var key = th.dataset.sort;
+        var state = sortState[tableName] || {};
+        var arrow = '';
+        if (state.key === key) arrow = state.dir === 1 ? ' ▲' : ' ▼';
+        th.textContent = th.dataset.label + arrow;
+      });
+    }
+
     function renderHosts(rows) {
       if (!hostsTbody) return;
+      var list = toArray(rows);
       var html = [];
-      (rows || []).forEach(function(r) {
+      list.forEach(function(r) {
+        if (!r || typeof r !== 'object') return;
         var ports = r.ports || {};
+        var ips = toArray(r.resolvedIps).slice().sort();
+        var ipsText = ips.length > 0 ? ips.join(', ') : '-';
+        var hostTitle = buildTitle([
+          'Host: ' + (r.host || ''),
+          'Aufgelöste IPv4: ' + (ips.length > 0 ? ips.join(', ') : 'keine'),
+          'Scanzeitpunkt (UTC): ' + formatUtc(r.checkedAtUtc)
+        ]);
+        var ipTitle = buildTitle([
+          'Host: ' + (r.host || ''),
+          'IP(s): ' + (ips.length > 0 ? ips.join(', ') : 'keine')
+        ]);
+        var dnsTitle = buildTitle([
+          r.dnsInfo || 'DNS-Info nicht verfügbar',
+          'Auflösungsmodus: System-Default'
+        ]);
+        var pingTitle = buildTitle([
+          r.pingInfo || 'Ping-Info nicht verfügbar'
+        ]);
         var portCells = portsOrder.map(function(p) {
           var isOpen = !!ports[String(p)];
           var cls = isOpen ? badgeOk : badgeFail;
@@ -962,11 +1165,13 @@ $dropdownOptions
           : badgeHtml(!!r.winRmOk, null);
         html.push(
           '<tr>' +
-            '<td class="font-mono">' + escapeHtml(r.host) + '</td>' +
-            '<td>' + badgeHtml(!!r.dnsOk, null) + '</td>' +
-            '<td>' + badgeHtml(!!r.pingOk, null) + '</td>' +
+            '<td class="font-mono" title="' + hostTitle + '">' + escapeHtml(r.host) + '</td>' +
+            '<td class="font-mono text-sm max-w-xs truncate" title="' + ipTitle + '">' + escapeHtml(ipsText) + '</td>' +
+            '<td title="' + dnsTitle + '">' + badgeHtml(!!r.dnsOk, null) + '</td>' +
+            '<td title="' + pingTitle + '">' + badgeHtml(!!r.pingOk, null) + '</td>' +
             portCells +
             '<td>' + winRmHtml + '</td>' +
+            '<td class="font-mono text-sm" title="Host-Scanzeitpunkt in UTC">' + escapeHtml(formatUtc(r.checkedAtUtc)) + '</td>' +
           '</tr>'
         );
       });
@@ -975,7 +1180,7 @@ $dropdownOptions
 
     function renderSubnet(rows) {
       if (!subnetTbody || !subnetSection) return;
-      var list = rows || [];
+      var list = toArray(rows);
       if (list.length === 0) {
         subnetSection.classList.add('hidden');
         subnetTbody.innerHTML = '';
@@ -984,14 +1189,26 @@ $dropdownOptions
       subnetSection.classList.remove('hidden');
       var html = [];
       list.forEach(function(r) {
-        var ips = (r.reachableIps || []).slice().sort();
+        if (!r || typeof r !== 'object') return;
+        var ips = toArray(r.reachableIps).slice().sort();
         var ipsText = ips.join(', ');
+        var sourceTitle = buildTitle([
+          'Quell-Host(s): ' + (r.sourceHost || '-'),
+          'Scan-Start (UTC): ' + formatUtc(r.scanStartedUtc),
+          'Scan-Ende (UTC): ' + formatUtc(r.scanFinishedUtc)
+        ]);
+        var ipTitle = buildTitle([
+          'Quell-Host(s): ' + (r.sourceHost || '-'),
+          'Erreichbare IPs: ' + (ipsText || '-')
+        ]);
         html.push(
           '<tr>' +
-            '<td class="font-mono">' + escapeHtml(r.sourceHost) + '</td>' +
+            '<td class="font-mono" title="' + sourceTitle + '">' + escapeHtml(r.sourceHost) + '</td>' +
             '<td class="font-mono">' + escapeHtml(r.subnet) + '</td>' +
             '<td>' + ips.length + '</td>' +
-            '<td class="font-mono text-sm max-w-md truncate" title="' + escapeHtml(ipsText) + '">' + escapeHtml(ipsText) + '</td>' +
+            '<td class="font-mono text-sm max-w-md truncate" title="' + ipTitle + '">' + escapeHtml(ipsText) + '</td>' +
+            '<td class="font-mono text-sm">' + escapeHtml(formatUtc(r.scanStartedUtc)) + '</td>' +
+            '<td class="font-mono text-sm">' + escapeHtml(formatUtc(r.scanFinishedUtc)) + '</td>' +
           '</tr>'
         );
       });
@@ -1006,6 +1223,30 @@ $dropdownOptions
       if (summaryPorts) summaryPorts.textContent = String(s.anyPortOpen || 0);
     }
 
+    function renderCurrent() {
+      renderSortIndicators();
+      renderHosts(sortRows(currentHosts, 'hosts'));
+      renderSubnet(sortRows(currentSubnet, 'subnet'));
+    }
+
+    function setupSorting() {
+      document.querySelectorAll('th[data-sort][data-table]').forEach(function(th) {
+        th.addEventListener('click', function() {
+          var tableName = th.dataset.table;
+          var key = th.dataset.sort;
+          if (!sortState[tableName]) return;
+          if (sortState[tableName].key === key) {
+            sortState[tableName].dir = sortState[tableName].dir * -1;
+          } else {
+            sortState[tableName].key = key;
+            sortState[tableName].dir = 1;
+          }
+          renderCurrent();
+        });
+      });
+      renderSortIndicators();
+    }
+
     function loadByKey(key) {
       var item = (dataIndex || []).find(function(x) { return x.key === key; }) || dataIndex[0];
       if (!item || !item.file) return;
@@ -1017,8 +1258,9 @@ $dropdownOptions
         })
         .then(function(data) {
           applySummary(data.summary || {});
-          renderHosts(data.results || []);
-          renderSubnet(data.subnetScanData || []);
+          currentHosts = toArray(data.results);
+          currentSubnet = toArray(data.subnetScanData);
+          renderCurrent();
           if (loadStatus) loadStatus.textContent = '';
         })
         .catch(function(err) {
@@ -1026,6 +1268,7 @@ $dropdownOptions
         });
     }
 
+    setupSorting();
     if (select) {
       select.addEventListener('change', function() { loadByKey(select.value); });
       loadByKey(select.value || 'ALL');
@@ -1219,7 +1462,18 @@ $resultsList = [System.Collections.ArrayList]::new()
 foreach ($r in @(ConvertTo-NormalizedHostResults -HostResults @($state.HostResults) -HostToTopFolders $hostToTopFolders)) {
     $tfs = if ($r.TopFolders) { @($r.TopFolders) } else { $hostToTopFolders[$r.Host] }
     if ($null -eq $tfs) { $tfs = @() }
-    [void]$resultsList.Add([pscustomobject]@{ Host = $r.Host; DnsOk = $r.DnsOk; PingOk = $r.PingOk; Ports = $r.Ports; WinRmOk = $r.WinRmOk; TopFolders = $tfs })
+    [void]$resultsList.Add([pscustomobject]@{
+        Host        = $r.Host
+        DnsOk       = $r.DnsOk
+        PingOk      = $r.PingOk
+        Ports       = $r.Ports
+        WinRmOk     = $r.WinRmOk
+        ResolvedIps = @($r.ResolvedIps)
+        DnsInfo     = $r.DnsInfo
+        PingInfo    = $r.PingInfo
+        CheckedAtUtc = $r.CheckedAtUtc
+        TopFolders  = $tfs
+    })
 }
 $checkedSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 foreach ($r in @($resultsList)) { if ($r.Host) { [void]$checkedSet.Add([string]$r.Host) } }
@@ -1249,19 +1503,67 @@ function Invoke-HostChecksBatch {
             catch { return $false }
         }
         $dnsOk = $false
-        try { [System.Net.Dns]::GetHostEntry($h) | Out-Null; $dnsOk = $true } catch { }
+        $resolvedIps = @()
+        $dnsInfo = 'System-Default-Resolver des ausführenden Hosts.'
+        try {
+            $entry = [System.Net.Dns]::GetHostEntry($h)
+            $resolvedIps = @(
+                $entry.AddressList |
+                    Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+                    ForEach-Object { $_.ToString() } |
+                    Sort-Object -Unique
+            )
+            $dnsOk = $true
+            if ($resolvedIps.Count -gt 0) {
+                $dnsInfo = "System-Default-Resolver; IPv4: $($resolvedIps -join ', ')"
+            }
+            else {
+                $dnsInfo = 'System-Default-Resolver; keine IPv4-Adresse zurückgeliefert.'
+            }
+        }
+        catch {
+            $dnsInfo = "System-Default-Resolver; Fehler: $($_.Exception.Message)"
+        }
+
         $pingOk = $false
-        try { $pingOk = Test-Connection -ComputerName $h -Count 1 -Quiet -ErrorAction SilentlyContinue } catch { }
+        $pingInfo = ''
+        try {
+            $pingReply = Test-Connection -ComputerName $h -Count 1 -ErrorAction Stop | Select-Object -First 1
+            if ($null -ne $pingReply) {
+                $pingOk = $true
+                $latencyValue = $null
+                if ($pingReply.PSObject.Properties.Match('Latency').Count -gt 0) {
+                    $latencyValue = $pingReply.Latency
+                }
+                $replyAddr = $null
+                if ($pingReply.PSObject.Properties.Match('Address').Count -gt 0) {
+                    $replyAddr = [string]$pingReply.Address
+                }
+                $latencyText = if ($null -ne $latencyValue -and $latencyValue -ne '') { "$latencyValue ms" } else { 'n/a' }
+                $addrText = if (-not [string]::IsNullOrWhiteSpace($replyAddr)) { $replyAddr } else { $h }
+                $pingInfo = "Erreichbar; Ziel: $addrText; Latenz: $latencyText"
+            }
+            else {
+                $pingInfo = 'Kein Ping-Replyobjekt zurückgegeben.'
+            }
+        }
+        catch {
+            $pingInfo = "Nicht erreichbar/Fehler: $($_.Exception.Message)"
+        }
         $portsResult = @{}
         foreach ($p in $ports) { $portsResult[$p] = Test-TcpPortInner -ComputerName $h -Port $p -TimeoutMs 2000 }
         $winRmOk = $null
         try { $null = Test-WSMan -ComputerName $h -ErrorAction Stop; $winRmOk = $true } catch { $winRmOk = $false }
         [pscustomobject]@{
-            Host    = $h
-            DnsOk   = $dnsOk
-            PingOk  = $pingOk
-            Ports   = $portsResult
-            WinRmOk = $winRmOk
+            Host         = $h
+            DnsOk        = $dnsOk
+            PingOk       = $pingOk
+            Ports        = $portsResult
+            WinRmOk      = $winRmOk
+            ResolvedIps  = @($resolvedIps)
+            DnsInfo      = $dnsInfo
+            PingInfo     = $pingInfo
+            CheckedAtUtc = (Get-Date).ToUniversalTime()
         }
     })
 }
@@ -1284,7 +1586,18 @@ try {
                     if ($br.Host -and -not $checkedSet.Contains($br.Host)) {
                         $tfs = $hostToTopFolders[$br.Host]
                         if ($null -eq $tfs) { $tfs = @() }
-                        [void]$resultsList.Add([pscustomobject]@{ Host = $br.Host; DnsOk = $br.DnsOk; PingOk = $br.PingOk; Ports = $br.Ports; WinRmOk = $br.WinRmOk; TopFolders = $tfs })
+                        [void]$resultsList.Add([pscustomobject]@{
+                            Host        = $br.Host
+                            DnsOk       = $br.DnsOk
+                            PingOk      = $br.PingOk
+                            Ports       = $br.Ports
+                            WinRmOk     = $br.WinRmOk
+                            ResolvedIps = @($br.ResolvedIps)
+                            DnsInfo     = $br.DnsInfo
+                            PingInfo    = $br.PingInfo
+                            CheckedAtUtc = $br.CheckedAtUtc
+                            TopFolders  = $tfs
+                        })
                         [void]$checkedSet.Add([string]$br.Host)
                     }
                 }
@@ -1342,7 +1655,9 @@ if ($SubnetScan -and $results.Count -gt 0) {
         Write-Progress -Activity 'Subnet-Scan' -Status $subnetKey -PercentComplete ([math]::Min(100, [int](100 * $idx / $totalSubnets)))
         $info = Get-SubnetBaseAndRange -Ip ($subnetKey -replace '\.0/\d+$', '.1') -PrefixLength $SubnetPrefixLength
         if (-not $info -or $null -eq $info.Last) { continue }
+        $scanStartedUtc = (Get-Date).ToUniversalTime()
         $reachable = Get-PingableIPsInSubnet -SubnetBase $info.Base -First $info.First -Last $info.Last -Throttle $ThrottleLimit
+        $scanFinishedUtc = (Get-Date).ToUniversalTime()
         $sourceHosts = @($subnetToHosts[$subnetKey])
         $sourceTopFoldersSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach ($sh in $sourceHosts) {
@@ -1354,6 +1669,8 @@ if ($SubnetScan -and $results.Count -gt 0) {
             SourceTopFolders = @($sourceTopFoldersSet)
             Subnet           = $subnetKey
             ReachableIPs     = @($reachable)
+            ScanStartedUtc   = $scanStartedUtc
+            ScanFinishedUtc  = $scanFinishedUtc
         }
         [void]$subnetScanData.Add($entry)
         [void]$scannedSubnetSet.Add($subnetKey)
