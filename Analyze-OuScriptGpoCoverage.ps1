@@ -551,7 +551,9 @@ function Get-ScriptInventory {
         $cats = @()
         if ($exists) {
             $content = Get-FileContentSafe -Path $path
-            $cats = Get-PrimaryCategoriesFromText -Text ($content ?? '') -Patterns $Patterns
+            $textForCategory = ''
+            if ($null -ne $content) { $textForCategory = [string]$content }
+            $cats = Get-PrimaryCategoriesFromText -Text $textForCategory -Patterns $Patterns
         }
         $items[$path] = [pscustomobject]@{
             ScriptPath  = $path
