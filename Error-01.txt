@@ -1,0 +1,40 @@
+PS C:\Users\S527189ADM\Downloads> .\Analyze-OuScriptGpoCoverage.ps1 -StartOuDn "OU=2165,OU=Companies,DC=voestalpine,DC=r
+oot,DC=local" -OutputPath ".\Anal-Ou.html" -IncludeContent
+At C:\Users\S527189ADM\Downloads\Analyze-OuScriptGpoCoverage.ps1:554 char:67
++ ...      $cats = Get-PrimaryCategoriesFromText -Text ($content ?? '') -Pa ...
++                                                                ~~
+Unexpected token '??' in expression or statement.
+At C:\Users\S527189ADM\Downloads\Analyze-OuScriptGpoCoverage.ps1:554 char:66
++ ...         $cats = Get-PrimaryCategoriesFromText -Text ($content ?? '')  ...
++                                                                  ~
+Missing closing ')' in expression.
+At C:\Users\S527189ADM\Downloads\Analyze-OuScriptGpoCoverage.ps1:552 char:22
++         if ($exists) {
++                      ~
+Missing closing '}' in statement block or type definition.
+At C:\Users\S527189ADM\Downloads\Analyze-OuScriptGpoCoverage.ps1:543 char:33
++     foreach ($r in $ScriptRefs) {
++                                 ~
+Missing closing '}' in statement block or type definition.
+At C:\Users\S527189ADM\Downloads\Analyze-OuScriptGpoCoverage.ps1:537 char:30
++ function Get-ScriptInventory {
++                              ~
+Missing closing '}' in statement block or type definition.
+At C:\Users\S527189ADM\Downloads\Analyze-OuScriptGpoCoverage.ps1:554 char:72
++ ...  $cats = Get-PrimaryCategoriesFromText -Text ($content ?? '') -Patter ...
++                                                                 ~
+Unexpected token ')' in expression or statement.
+At C:\Users\S527189ADM\Downloads\Analyze-OuScriptGpoCoverage.ps1:555 char:9
++         }
++         ~
+Unexpected token '}' in expression or statement.
+At C:\Users\S527189ADM\Downloads\Analyze-OuScriptGpoCoverage.ps1:563 char:5
++     }
++     ~
+Unexpected token '}' in expression or statement.
+At C:\Users\S527189ADM\Downloads\Analyze-OuScriptGpoCoverage.ps1:565 char:1
++ }
++ ~
+Unexpected token '}' in expression or statement.
+    + CategoryInfo          : ParserError: (:) [], ParseException
+    + FullyQualifiedErrorId : UnexpectedToken
