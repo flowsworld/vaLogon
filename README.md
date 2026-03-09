@@ -109,6 +109,15 @@ Der Fokus liegt auf **Security**, **Abhängigkeiten**, **Nutzung**, **Duplikaten
   - Resume/Checkpoint: robuster Resume-Modus über Checkpoint + Artefaktdateien (explizit via `-Resume`, automatisch ohne `-NoAutoResume`), optional persistente Zustände mit `-KeepResumeData`.
   - Parameter: `-ScriptsPath` (Pflicht), `-OutputPath` (Default: `.\HostReachabilityReport.html`), `-Encoding` (Fallback), `-ThrottleLimit` (Parallelität, Default: 8), `-SubnetScan` (Subnetz-Scan aktivieren, Default: aus), `-SubnetPrefixLength` (CIDR, Default: 24), `-Resume`, `-NoAutoResume`, `-CheckpointPath`, `-KeepResumeData`.
 
+- `Analyze-OuScriptGpoCoverage.ps1`  
+  Eigenständiges Skript zur **OU-basierten Script/GPO-Abdeckungsanalyse**:
+  - Durchsucht eine Start-OU inkl. aller untergeordneten OUs nach User- und Computerobjekten.
+  - Ermittelt pro Objekt statisch effektive GPOs (OU-Vererbung + Security-Filter via GPO-Berechtigungen/Token-Gruppen).
+  - Analysiert Logon/Logoff/Startup/Shutdown-Skriptreferenzen aus GPOs (`scripts.ini`/`psscripts.ini` + GPO-Report XML) sowie AD-`scriptPath` bei Usern.
+  - Unterstützt Skripttypen `.ps1`, `.psm1`, `.bat`, `.cmd`, `.vbs`, `.kix` inkl. Funktionsklassifikation (z. B. Laufwerke, Drucker, Software, Security, Umgebung, Inventar).
+  - Erstellt einen interaktiven HTML-Report mit objektindividueller Coverage (`abgedeckt`, `teilweise`, `nicht-abgedeckt`) und konkreten Vorschlägen, welche GPOs ergänzt werden können; optional mit vollständigen Skriptinhalten.
+  - Parameter: `-StartOuDn` (Pflicht), `-DomainFqdn` (optional), `-OutputPath`, `-IncludeContent`, `-Resume`, `-CheckpointPath`, `-Encoding`, `-MaxScriptBytes`.
+
 - `Export-CopilotAnalysisReport.ps1`  
   Erzeugt einen **Markdown-Report** zur Auswertung mit **Microsoft 365 Copilot** (Word, Teams):
   - Pro Skript: **Dateiname** (kein Dateipfad), Typ, Kategorie, Nutzung/Kritikalität, Abhängigkeiten, SHA256 und GPO-Migrationsempfehlung.
@@ -234,6 +243,23 @@ Resume/Checkpoint:
 - zusätzliche Artefaktdateien für robustes Fortsetzen (`*.host-results.json`, `*.subnet-data.json`)
 - Auto-Resume standardmäßig aktiv (abschaltbar via `-NoAutoResume`), explizites Resume via `-Resume`
 - bei erfolgreichem Lauf werden Resume-Dateien standardmäßig gelöscht (behaltbar via `-KeepResumeData`)
+
+#### OU-basierte Script/GPO-Abdeckung
+
+```powershell
+pwsh.exe -File .\Analyze-OuScriptGpoCoverage.ps1 `
+    -StartOuDn 'OU=StandortA,OU=Benutzer,DC=contoso,DC=local' `
+    -OutputPath 'D:\Reports\OuScriptGpoCoverage.html' `
+    -IncludeContent
+```
+
+Optional: `-DomainFqdn 'contoso.local'`, `-Resume`, `-CheckpointPath '.\ou_script_gpo_coverage_checkpoint.json'`, `-MaxScriptBytes 1048576`.
+
+Das Skript berechnet pro User/Computer in der OU-Hierarchie die statisch effektiven GPOs, korreliert sie mit den tatsächlich referenzierten Skripten (Logon/Logoff/Startup/Shutdown sowie AD-`scriptPath`) und zeigt je Objekt Überschneidungen/Lücken nach Funktionskategorien an.  
+Ausgabe:
+- `<OutputPath>.html` (interaktiv, inkl. Mermaid-Datenfluss)
+- `<OutputPath>.json` (vollständiger Datensatz für Nachanalyse)
+- Checkpoint-Datei für Resume (falls aktiviert)
 
 #### Report für Microsoft 365 Copilot
 
